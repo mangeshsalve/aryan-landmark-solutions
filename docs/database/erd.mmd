@@ -1,0 +1,17 @@
+erDiagram
+  ROLES ||--o{ APP_USERS : has
+  PERSONS ||--o| APP_USERS : account
+  PERSONS ||--o| CUSTOMERS : customer
+  PROPERTY_CATEGORIES ||--o{ PROPERTIES : categorizes
+  LOCATIONS ||--o{ PROPERTIES : locates
+  CUSTOMERS ||--o{ INQUIRIES : submits
+  PROPERTIES ||--o{ INQUIRIES : concerns
+  APP_USERS ||--o{ INQUIRIES : handles
+  APP_USERS ||--o{ INQUIRIES : assigned_to
+  PROPERTIES ||--o{ PROPERTY_PHOTOS : has
+  PROPERTIES ||--o{ PROPERTY_DOCUMENTS : has
+  DOCUMENT_TYPES ||--o{ PROPERTY_DOCUMENTS : classifies
+  INQUIRIES ||--o{ INQUIRY_ASSIGNMENT_HISTORY : reassigns
+  INQUIRIES ||--o{ INQUIRY_RECORDINGS : records
+  APP_USERS ||--o{ REFRESH_TOKENS : owns
+  APP_USERS ||--o{ AUDIT_LOGS : creates

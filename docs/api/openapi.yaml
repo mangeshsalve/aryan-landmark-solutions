@@ -1,0 +1,256 @@
+openapi: 3.0.3
+info:
+  title: Aryan Landmark Solutions API
+  version: 1.0.0
+servers:
+  - url: /api/v1
+
+paths:
+  /auth/login:
+    post:
+      summary: Application user login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200': {description: Success}
+        '401': {description: Invalid credentials}
+
+  /auth/refresh:
+    post:
+      summary: Refresh application token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshRequest'
+      responses:
+        '200': {description: Success}
+
+  /auth/logout:
+    post:
+      security: [{bearerAuth: []}]
+      responses:
+        '204': {description: Logged out}
+
+  /master-auth/login:
+    post:
+      summary: Login to separate Master Record Management UI
+      description: Credentials are manually provisioned in master_access_credentials.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200': {description: Master access granted}
+        '401': {description: Invalid master credentials}
+
+  /master/users:
+    post:
+      security: [{masterBearerAuth: []}]
+      summary: Create USER master record
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateUserRequest'
+      responses:
+        '201': {description: Created}
+
+  /master/customers:
+    post:
+      security: [{masterBearerAuth: []}]
+      summary: Create CUSTOMER master record
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCustomerRequest'
+      responses:
+        '201': {description: Created}
+
+  /users:
+    get:
+      security: [{bearerAuth: []}]
+      responses:
+        '200': {description: Users}
+
+  /customers:
+    get:
+      security: [{bearerAuth: []}]
+      responses:
+        '200': {description: Customers}
+
+  /properties:
+    get:
+      security: [{bearerAuth: []}]
+      responses:
+        '200': {description: Properties}
+    post:
+      security: [{bearerAuth: []}]
+      responses:
+        '201': {description: Created}
+
+  /inquiries:
+    get:
+      security: [{bearerAuth: []}]
+      responses:
+        '200': {description: Inquiries}
+    post:
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateInquiryRequest'
+      responses:
+        '201': {description: Created}
+        '400': {description: Validation error}
+        '403': {description: Forbidden}
+
+  /inquiries/{inquiryId}:
+    get:
+      security: [{bearerAuth: []}]
+      parameters: [{name: inquiryId, in: path, required: true, schema: {type: string, format: uuid}}]
+      responses:
+        '200': {description: Inquiry}
+    patch:
+      security: [{bearerAuth: []}]
+      parameters: [{name: inquiryId, in: path, required: true, schema: {type: string, format: uuid}}]
+      responses:
+        '200': {description: Updated}
+
+  /inquiries/{inquiryId}/assign:
+    post:
+      security: [{bearerAuth: []}]
+      parameters: [{name: inquiryId, in: path, required: true, schema: {type: string, format: uuid}}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AssignInquiryRequest'
+      responses:
+        '200': {description: Assigned}
+
+  /inquiries/{inquiryId}/recordings:
+    post:
+      security: [{bearerAuth: []}]
+      parameters: [{name: inquiryId, in: path, required: true, schema: {type: string, format: uuid}}]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: {type: string, format: binary}
+                description: {type: string}
+      responses:
+        '201': {description: Uploaded}
+
+  /inquiries/{inquiryId}/public:
+    patch:
+      security: [{bearerAuth: []}]
+      parameters: [{name: inquiryId, in: path, required: true, schema: {type: string, format: uuid}}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [isPublic]
+              properties:
+                isPublic: {type: boolean}
+      responses:
+        '200': {description: Updated}
+
+  /public/properties:
+    get:
+      summary: Public approved property listing
+      responses:
+        '200': {description: Public property data}
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    masterBearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username: {type: string}
+        password: {type: string, format: password}
+
+    RefreshRequest:
+      type: object
+      required: [refreshToken]
+      properties:
+        refreshToken: {type: string}
+
+    CreateUserRequest:
+      type: object
+      required: [name, mobile, password, roleId]
+      properties:
+        name: {type: string}
+        email: {type: string, format: email}
+        mobile: {type: string}
+        alternateMobile: {type: string}
+        address: {type: string}
+        city: {type: string}
+        state: {type: string}
+        pincode: {type: string}
+        password: {type: string, format: password}
+        roleId: {type: string, format: uuid}
+
+    CreateCustomerRequest:
+      type: object
+      required: [name, mobile]
+      properties:
+        name: {type: string}
+        email: {type: string, format: email}
+        mobile: {type: string}
+        alternateMobile: {type: string}
+        address: {type: string}
+        city: {type: string}
+        state: {type: string}
+        pincode: {type: string}
+
+    CreateInquiryRequest:
+      type: object
+      properties:
+        customerId: {type: string, format: uuid}
+        propertyId: {type: string, format: uuid}
+        type: {type: string}
+        priority:
+          type: string
+          enum: [LOW, MEDIUM, HIGH, URGENT]
+        externalReference: {type: string}
+        handledByUserId: {type: string, format: uuid}
+        assignedToUserId: {type: string, format: uuid}
+        remarks: {type: string}
+
+    AssignInquiryRequest:
+      type: object
+      required: [assignedToUserId]
+      properties:
+        assignedToUserId: {type: string, format: uuid}
+        reason: {type: string}
