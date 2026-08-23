@@ -1,17 +1,105 @@
 erDiagram
-  ROLES ||--o{ APP_USERS : has
-  PERSONS ||--o| APP_USERS : account
-  PERSONS ||--o| CUSTOMERS : customer
-  PROPERTY_CATEGORIES ||--o{ PROPERTIES : categorizes
-  LOCATIONS ||--o{ PROPERTIES : locates
-  CUSTOMERS ||--o{ INQUIRIES : submits
-  PROPERTIES ||--o{ INQUIRIES : concerns
-  APP_USERS ||--o{ INQUIRIES : handles
-  APP_USERS ||--o{ INQUIRIES : assigned_to
-  PROPERTIES ||--o{ PROPERTY_PHOTOS : has
-  PROPERTIES ||--o{ PROPERTY_DOCUMENTS : has
-  DOCUMENT_TYPES ||--o{ PROPERTY_DOCUMENTS : classifies
-  INQUIRIES ||--o{ INQUIRY_ASSIGNMENT_HISTORY : reassigns
-  INQUIRIES ||--o{ INQUIRY_RECORDINGS : records
-  APP_USERS ||--o{ REFRESH_TOKENS : owns
-  APP_USERS ||--o{ AUDIT_LOGS : creates
+
+    USERS ||--o{ PROPERTIES : creates
+    USERS ||--o{ INQUIRIES : customer
+    USERS ||--o{ INQUIRIES : handles
+    USERS ||--o{ INQUIRIES : assigned_to
+    USERS ||--o{ INQUIRIES : creates
+
+    PROPERTIES ||--o{ INQUIRIES : referenced_by
+
+    PROPERTIES ||--o{ ATTACHMENTS : property_files
+    INQUIRIES ||--o{ ATTACHMENTS : inquiry_files
+
+    INQUIRIES ||--o{ INQUIRY_ASSIGNMENTS : assignment_history
+
+    USERS ||--o{ ATTACHMENTS : uploads
+    USERS ||--o{ INQUIRY_ASSIGNMENTS : assigns
+
+    USERS ||--o{ AUDIT_LOGS : performs
+
+    USERS {
+        uuid id PK
+        varchar user_id UK
+        enum user_type
+        enum role
+        varchar name
+        varchar email
+        varchar mobile
+        text password_hash
+        enum status
+    }
+
+    PROPERTIES {
+        uuid id PK
+        varchar property_code UK
+        varchar property_type
+        enum category
+        decimal area
+        varchar area_unit
+        decimal price
+        varchar price_unit
+        varchar gat_no_details
+        text description
+        text address
+        varchar city
+        decimal latitude
+        decimal longitude
+        text map_url
+        enum status
+    }
+
+    INQUIRIES {
+        uuid id PK
+        varchar inquiry_number UK
+        uuid customer_id FK
+        uuid property_id FK
+        varchar type
+        enum priority
+        enum status
+        varchar external_reference
+        uuid handled_by_user_id FK
+        uuid assigned_to_user_id FK
+        text remarks
+        boolean is_public
+    }
+
+    ATTACHMENTS {
+        uuid id PK
+        uuid property_id FK
+        uuid inquiry_id FK
+        enum attachment_type
+        enum document_type
+        varchar file_name
+        varchar mime_type
+        bigint file_size_bytes
+        varchar r2_bucket
+        varchar r2_object_key UK
+        text file_url
+        boolean is_primary
+        integer display_order
+        uuid uploaded_by FK
+    }
+
+    INQUIRY_ASSIGNMENTS {
+        uuid id PK
+        uuid inquiry_id FK
+        uuid assigned_from_user_id FK
+        uuid assigned_to_user_id FK
+        timestamptz assigned_at
+        text reason
+        uuid created_by FK
+    }
+
+    AUDIT_LOGS {
+        uuid id PK
+        uuid user_id FK
+        varchar entity_type
+        uuid entity_id
+        varchar action
+        jsonb old_values
+        jsonb new_values
+        inet ip_address
+        text user_agent
+        timestamptz created_at
+    }

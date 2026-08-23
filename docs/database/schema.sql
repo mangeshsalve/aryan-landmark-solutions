@@ -1,173 +1,146 @@
+-- Aryan Landmark Solutions
+-- FINAL 6-TABLE POSTGRESQL REFERENCE SCHEMA
+-- Executable source of truth: prisma/schema.prisma
+
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
-CREATE TABLE roles (
- id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
- code VARCHAR(50) NOT NULL UNIQUE,
- name VARCHAR(100) NOT NULL,
- description TEXT,
- status VARCHAR(30) NOT NULL DEFAULT 'ACTIVE',
- created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
- updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
- CHECK (status IN ('ACTIVE','INACTIVE'))
+CREATE TYPE user_type AS ENUM ('APPLICATION_USER','CUSTOMER','MASTER');
+CREATE TYPE application_role AS ENUM ('ADMIN','EMPLOYEE');
+CREATE TYPE user_status AS ENUM ('ACTIVE','INACTIVE','BLOCKED');
+
+CREATE TYPE property_category AS ENUM (
+  'RESIDENTIAL','INDUSTRIAL','COMMERCIAL','AGRICULTURAL'
 );
 
-CREATE TABLE persons (
- id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
- name VARCHAR(150) NOT NULL,
- email VARCHAR(255),
- mobile VARCHAR(20),
- alternate_mobile VARCHAR(20),
- address TEXT,
- city VARCHAR(100),
- state VARCHAR(100),
- pincode VARCHAR(10),
- status VARCHAR(30) NOT NULL DEFAULT 'ACTIVE',
- created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
- updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
- created_by UUID,
- updated_by UUID,
- CHECK (status IN ('ACTIVE','INACTIVE','BLOCKED'))
-);
-CREATE INDEX idx_persons_email ON persons(lower(email));
-CREATE INDEX idx_persons_mobile ON persons(mobile);
-
-CREATE TABLE app_users (
- id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
- user_id VARCHAR(50) NOT NULL UNIQUE,
- person_id UUID NOT NULL UNIQUE REFERENCES persons(id),
- password_hash TEXT NOT NULL,
- role_id UUID NOT NULL REFERENCES roles(id),
- status VARCHAR(30) NOT NULL DEFAULT 'ACTIVE',
- last_login_at TIMESTAMPTZ,
- created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
- updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
- created_by UUID,
- updated_by UUID,
- CHECK (status IN ('ACTIVE','INACTIVE','BLOCKED'))
-);
-CREATE INDEX idx_app_users_role ON app_users(role_id);
-CREATE INDEX idx_app_users_status ON app_users(status);
-
-CREATE TABLE customers (
- id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
- person_id UUID NOT NULL UNIQUE REFERENCES persons(id),
- customer_code VARCHAR(50) NOT NULL UNIQUE,
- created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
- updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
- created_by UUID,
- updated_by UUID
+CREATE TYPE property_status AS ENUM (
+  'AVAILABLE','SOLD','ON_HOLD','INACTIVE'
 );
 
-CREATE TABLE property_categories (
- id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
- code VARCHAR(50) NOT NULL UNIQUE,
- name VARCHAR(100) NOT NULL UNIQUE,
- description TEXT,
- status VARCHAR(30) NOT NULL DEFAULT 'ACTIVE',
- created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
- updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
- CHECK (status IN ('ACTIVE','INACTIVE'))
+CREATE TYPE attachment_type AS ENUM (
+  'PHOTO','DOCUMENT','RECORDING'
 );
 
-CREATE TABLE document_types (
- id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
- code VARCHAR(50) NOT NULL UNIQUE,
- name VARCHAR(100) NOT NULL UNIQUE,
- description TEXT,
- status VARCHAR(30) NOT NULL DEFAULT 'ACTIVE',
- created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
- updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
- CHECK (status IN ('ACTIVE','INACTIVE'))
+CREATE TYPE document_type AS ENUM (
+  'SEVEN_TWELVE','SALE_DEED','PROPERTY_CARD','NOC','OTHER'
 );
 
-CREATE TABLE locations (
- id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
- address TEXT,
- locality VARCHAR(150),
- city VARCHAR(100),
- state VARCHAR(100),
- pincode VARCHAR(10),
- latitude NUMERIC(10,7),
- longitude NUMERIC(10,7),
- map_url TEXT,
- created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
- updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
- CHECK (latitude IS NULL OR latitude BETWEEN -90 AND 90),
- CHECK (longitude IS NULL OR longitude BETWEEN -180 AND 180)
+CREATE TYPE inquiry_status AS ENUM (
+  'NEW','IN_PROGRESS','ON_HOLD','COMPLETED','CANCELLED'
 );
-CREATE INDEX idx_locations_city ON locations(city);
+
+CREATE TYPE inquiry_priority AS ENUM (
+  'LOW','MEDIUM','HIGH','URGENT'
+);
+
+CREATE TABLE users (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id VARCHAR(50) UNIQUE,
+  user_type user_type NOT NULL,
+  role application_role,
+  name VARCHAR(150) NOT NULL,
+  email VARCHAR(255),
+  mobile VARCHAR(20),
+  alternate_mobile VARCHAR(20),
+  address TEXT,
+  city VARCHAR(100),
+  state VARCHAR(100),
+  pincode VARCHAR(10),
+  password_hash TEXT,
+  status user_status NOT NULL DEFAULT 'ACTIVE',
+  last_login_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  created_by UUID REFERENCES users(id),
+  updated_by UUID REFERENCES users(id),
+
+  CONSTRAINT chk_users_identity CHECK (
+    (user_type='APPLICATION_USER'
+      AND user_id IS NOT NULL
+      AND password_hash IS NOT NULL
+      AND role IS NOT NULL)
+    OR
+    (user_type='CUSTOMER'
+      AND user_id IS NULL
+      AND password_hash IS NULL
+      AND role IS NULL)
+    OR
+    (user_type='MASTER'
+      AND user_id IS NOT NULL
+      AND password_hash IS NOT NULL
+      AND role IS NULL)
+  )
+);
+
+CREATE UNIQUE INDEX uq_users_email
+  ON users(lower(email))
+  WHERE email IS NOT NULL;
+
+CREATE INDEX idx_users_mobile ON users(mobile);
+CREATE INDEX idx_users_type_status ON users(user_type,status);
 
 CREATE TABLE properties (
- id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
- property_code VARCHAR(50) NOT NULL UNIQUE,
- property_type VARCHAR(50) NOT NULL,
- category_id UUID REFERENCES property_categories(id),
- location_id UUID REFERENCES locations(id),
- area NUMERIC(14,2),
- area_unit VARCHAR(20),
- price NUMERIC(18,2),
- price_unit VARCHAR(20),
- gat_no_details VARCHAR(255),
- description TEXT,
- status VARCHAR(30) NOT NULL DEFAULT 'AVAILABLE',
- created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
- updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
- created_by UUID REFERENCES app_users(id),
- updated_by UUID REFERENCES app_users(id),
- CHECK (status IN ('AVAILABLE','SOLD','ON_HOLD','INACTIVE')),
- CHECK (area IS NULL OR area >= 0),
- CHECK (price IS NULL OR price >= 0)
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  property_code VARCHAR(50) NOT NULL UNIQUE,
+  property_type VARCHAR(50) NOT NULL,
+  category property_category NOT NULL,
+  area NUMERIC(14,2),
+  area_unit VARCHAR(20),
+  price NUMERIC(18,2),
+  price_unit VARCHAR(20),
+  gat_no_details VARCHAR(255),
+  description TEXT,
+
+  address TEXT,
+  locality VARCHAR(150),
+  city VARCHAR(100),
+  state VARCHAR(100),
+  pincode VARCHAR(10),
+  latitude NUMERIC(10,7),
+  longitude NUMERIC(10,7),
+  map_url TEXT,
+
+  status property_status NOT NULL DEFAULT 'AVAILABLE',
+
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  created_by UUID REFERENCES users(id),
+  updated_by UUID REFERENCES users(id),
+
+  CHECK (area IS NULL OR area >= 0),
+  CHECK (price IS NULL OR price >= 0),
+  CHECK (latitude IS NULL OR latitude BETWEEN -90 AND 90),
+  CHECK (longitude IS NULL OR longitude BETWEEN -180 AND 180)
 );
-CREATE INDEX idx_properties_category ON properties(category_id);
-CREATE INDEX idx_properties_location ON properties(location_id);
+
 CREATE INDEX idx_properties_status ON properties(status);
-
-CREATE TABLE property_photos (
- id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
- property_id UUID NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
- cloudinary_url TEXT NOT NULL,
- cloudinary_public_id VARCHAR(500) NOT NULL,
- is_primary BOOLEAN NOT NULL DEFAULT FALSE,
- display_order INTEGER NOT NULL DEFAULT 0,
- uploaded_by UUID REFERENCES app_users(id),
- created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-CREATE INDEX idx_property_photos_property ON property_photos(property_id);
-CREATE UNIQUE INDEX uq_property_primary_photo
- ON property_photos(property_id) WHERE is_primary=TRUE;
-
-CREATE TABLE property_documents (
- id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
- property_id UUID NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
- document_type_id UUID NOT NULL REFERENCES document_types(id),
- file_name VARCHAR(255) NOT NULL,
- cloudinary_url TEXT NOT NULL,
- cloudinary_public_id VARCHAR(500) NOT NULL,
- resource_type VARCHAR(50),
- uploaded_by UUID REFERENCES app_users(id),
- created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-CREATE INDEX idx_property_documents_property ON property_documents(property_id);
+CREATE INDEX idx_properties_city ON properties(city);
+CREATE INDEX idx_properties_category ON properties(category);
 
 CREATE TABLE inquiries (
- id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
- inquiry_number VARCHAR(50) NOT NULL UNIQUE,
- customer_id UUID REFERENCES customers(id),
- property_id UUID REFERENCES properties(id),
- type VARCHAR(50),
- priority VARCHAR(30) DEFAULT 'MEDIUM',
- status VARCHAR(50) NOT NULL DEFAULT 'NEW',
- external_reference VARCHAR(255),
- handled_by_user_id UUID REFERENCES app_users(id),
- assigned_to_user_id UUID REFERENCES app_users(id),
- remarks TEXT,
- is_public BOOLEAN NOT NULL DEFAULT FALSE,
- created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
- updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
- created_by UUID REFERENCES app_users(id),
- updated_by UUID REFERENCES app_users(id),
- CHECK (priority IS NULL OR priority IN ('LOW','MEDIUM','HIGH','URGENT'))
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  inquiry_number VARCHAR(50) NOT NULL UNIQUE,
+
+  customer_id UUID NOT NULL REFERENCES users(id),
+  property_id UUID REFERENCES properties(id),
+
+  type VARCHAR(50),
+  priority inquiry_priority NOT NULL DEFAULT 'MEDIUM',
+  status inquiry_status NOT NULL DEFAULT 'NEW',
+
+  external_reference VARCHAR(255),
+
+  handled_by_user_id UUID REFERENCES users(id),
+  assigned_to_user_id UUID REFERENCES users(id),
+
+  remarks TEXT,
+  is_public BOOLEAN NOT NULL DEFAULT FALSE,
+
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  created_by UUID NOT NULL REFERENCES users(id),
+  updated_by UUID REFERENCES users(id)
 );
+
 CREATE INDEX idx_inquiries_customer ON inquiries(customer_id);
 CREATE INDEX idx_inquiries_property ON inquiries(property_id);
 CREATE INDEX idx_inquiries_status ON inquiries(status);
@@ -176,82 +149,100 @@ CREATE INDEX idx_inquiries_handled ON inquiries(handled_by_user_id);
 CREATE INDEX idx_inquiries_public ON inquiries(is_public);
 CREATE INDEX idx_inquiries_created ON inquiries(created_at DESC);
 
-CREATE TABLE inquiry_assignment_history (
- id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
- inquiry_id UUID NOT NULL REFERENCES inquiries(id) ON DELETE CASCADE,
- assigned_from_user_id UUID REFERENCES app_users(id),
- assigned_to_user_id UUID NOT NULL REFERENCES app_users(id),
- assigned_at TIMESTAMPTZ NOT NULL DEFAULT now(),
- reason TEXT,
- created_by UUID REFERENCES app_users(id)
-);
-CREATE INDEX idx_assignment_history_inquiry
- ON inquiry_assignment_history(inquiry_id, assigned_at DESC);
+CREATE TABLE attachments (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 
-CREATE TABLE inquiry_recordings (
- id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
- inquiry_id UUID NOT NULL REFERENCES inquiries(id) ON DELETE CASCADE,
- cloudinary_url TEXT NOT NULL,
- cloudinary_public_id VARCHAR(500) NOT NULL,
- file_name VARCHAR(255) NOT NULL,
- duration_seconds INTEGER,
- uploaded_by UUID REFERENCES app_users(id),
- created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-CREATE INDEX idx_recordings_inquiry ON inquiry_recordings(inquiry_id,created_at DESC);
+  property_id UUID REFERENCES properties(id) ON DELETE CASCADE,
+  inquiry_id UUID REFERENCES inquiries(id) ON DELETE CASCADE,
 
-CREATE TABLE refresh_tokens (
- id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
- user_id UUID NOT NULL REFERENCES app_users(id) ON DELETE CASCADE,
- token_hash TEXT NOT NULL UNIQUE,
- expires_at TIMESTAMPTZ NOT NULL,
- revoked_at TIMESTAMPTZ,
- created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  attachment_type attachment_type NOT NULL,
+  document_type document_type,
+
+  file_name VARCHAR(255) NOT NULL,
+  mime_type VARCHAR(150) NOT NULL,
+  file_size_bytes BIGINT,
+
+  r2_bucket VARCHAR(255) NOT NULL,
+  r2_object_key VARCHAR(1024) NOT NULL UNIQUE,
+  file_url TEXT,
+
+  is_primary BOOLEAN NOT NULL DEFAULT FALSE,
+  display_order INTEGER NOT NULL DEFAULT 0,
+
+  uploaded_by UUID NOT NULL REFERENCES users(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+  CONSTRAINT chk_attachment_relationship CHECK (
+    (attachment_type='PHOTO' AND property_id IS NOT NULL)
+    OR
+    (attachment_type='DOCUMENT' AND property_id IS NOT NULL)
+    OR
+    (attachment_type='RECORDING' AND inquiry_id IS NOT NULL)
+  ),
+
+  CONSTRAINT chk_attachment_document_type CHECK (
+    (attachment_type='DOCUMENT' AND document_type IS NOT NULL)
+    OR
+    (attachment_type IN ('PHOTO','RECORDING') AND document_type IS NULL)
+  ),
+
+  CONSTRAINT chk_attachment_size CHECK (
+    file_size_bytes IS NULL OR file_size_bytes >= 0
+  )
 );
-CREATE INDEX idx_refresh_tokens_user ON refresh_tokens(user_id);
+
+CREATE INDEX idx_attachments_property
+  ON attachments(property_id);
+
+CREATE INDEX idx_attachments_inquiry
+  ON attachments(inquiry_id);
+
+CREATE INDEX idx_attachments_type
+  ON attachments(attachment_type);
+
+CREATE INDEX idx_attachments_inquiry_type
+  ON attachments(inquiry_id,attachment_type);
+
+CREATE UNIQUE INDEX uq_property_primary_photo
+  ON attachments(property_id)
+  WHERE attachment_type='PHOTO' AND is_primary=TRUE;
+
+CREATE TABLE inquiry_assignments (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  inquiry_id UUID NOT NULL REFERENCES inquiries(id) ON DELETE CASCADE,
+
+  assigned_from_user_id UUID REFERENCES users(id),
+  assigned_to_user_id UUID NOT NULL REFERENCES users(id),
+
+  assigned_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  reason TEXT,
+
+  created_by UUID NOT NULL REFERENCES users(id)
+);
+
+CREATE INDEX idx_inquiry_assignments_inquiry
+  ON inquiry_assignments(inquiry_id,assigned_at DESC);
 
 CREATE TABLE audit_logs (
- id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
- user_id UUID REFERENCES app_users(id),
- entity_type VARCHAR(100) NOT NULL,
- entity_id UUID,
- action VARCHAR(50) NOT NULL,
- old_values JSONB,
- new_values JSONB,
- ip_address INET,
- user_agent TEXT,
- created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-CREATE INDEX idx_audit_entity ON audit_logs(entity_type,entity_id,created_at DESC);
-CREATE INDEX idx_audit_user ON audit_logs(user_id,created_at DESC);
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 
-CREATE TABLE master_access_credentials (
- id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
- username VARCHAR(100) NOT NULL UNIQUE,
- password_hash TEXT NOT NULL,
- status VARCHAR(30) NOT NULL DEFAULT 'ACTIVE',
- last_login_at TIMESTAMPTZ,
- created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
- updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
- CHECK (status IN ('ACTIVE','INACTIVE','BLOCKED'))
+  user_id UUID REFERENCES users(id),
+
+  entity_type VARCHAR(100) NOT NULL,
+  entity_id UUID,
+  action VARCHAR(100) NOT NULL,
+
+  old_values JSONB,
+  new_values JSONB,
+
+  ip_address INET,
+  user_agent TEXT,
+
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-INSERT INTO roles(code,name,description) VALUES
- ('ADMIN','Administrator','Full application access'),
- ('EMPLOYEE','Employee','Operational access')
-ON CONFLICT(code) DO NOTHING;
+CREATE INDEX idx_audit_entity
+  ON audit_logs(entity_type,entity_id,created_at DESC);
 
-INSERT INTO property_categories(code,name) VALUES
- ('RESIDENTIAL','Residential'),
- ('INDUSTRIAL','Industrial'),
- ('COMMERCIAL','Commercial'),
- ('AGRICULTURAL','Agricultural')
-ON CONFLICT(code) DO NOTHING;
-
-INSERT INTO document_types(code,name) VALUES
- ('SEVEN_TWELVE','7/12 Extract'),
- ('SALE_DEED','Sale Deed'),
- ('PROPERTY_CARD','Property Card'),
- ('NOC','NOC'),
- ('OTHER','Other')
-ON CONFLICT(code) DO NOTHING;
+CREATE INDEX idx_audit_user
+  ON audit_logs(user_id,created_at DESC);

@@ -1,15 +1,47 @@
-# Aryan Landmark Solutions — Production Specification
+# Aryan Landmark Solutions — Final Architecture Package
 
-This package is the engineering source of truth for Claude Code.
+This package contains the final database/API architecture for the greenfield
+production application.
 
-Read in this order:
-1. CLAUDE.md
-2. docs/requirements/business-requirements.md
-3. docs/database/database-design.md
-4. docs/database/schema.sql
-5. docs/api/openapi.yaml
-6. docs/architecture/
-7. docs/implementation-checklist.md
+## Final PostgreSQL tables
 
-The implementation should be done incrementally, not by generating the entire
-application in one operation.
+- users
+- properties
+- attachments
+- inquiries
+- inquiry_assignments
+- audit_logs
+
+## Important change
+
+`inquiry_attachment` and `inquiry_recordings` were consolidated into:
+
+`attachments`
+
+The `attachments.attachment_type` values are:
+
+- PHOTO
+- DOCUMENT
+- RECORDING
+
+The `attachments.file_size_bytes` column stores the file size in bytes.
+
+## Storage
+
+Cloudflare R2.
+
+No Cloudinary.
+No local production file storage.
+No binary file storage in PostgreSQL.
+
+## Authoritative documents
+
+- docs/database/database-design.md
+- docs/database/schema.sql
+- docs/database/erd.mmd
+- docs/api/openapi.yaml
+- docs/api/api-conventions.md
+- docs/architecture/greenfield-implementation-plan.md
+
+`prisma/schema.prisma` will become the executable schema source of truth when
+the backend implementation starts.

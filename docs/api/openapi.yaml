@@ -1,14 +1,51 @@
 openapi: 3.0.3
+
 info:
   title: Aryan Landmark Solutions API
   version: 1.0.0
+  description: |
+    Production REST API for Aryan Landmark Solutions.
+
+    PostgreSQL contains six tables. All property photos, property documents
+    and inquiry call recordings use one unified `attachments` resource.
+
+    Cloudflare R2 stores file binaries. PostgreSQL stores metadata and the R2
+    object key.
+
 servers:
   - url: /api/v1
 
+tags:
+  - name: Health
+  - name: Authentication
+  - name: Master Authentication
+  - name: Master Management
+  - name: Users
+  - name: Customers
+  - name: Properties
+  - name: Attachments
+  - name: Inquiries
+  - name: Inquiry Assignments
+  - name: Public Properties
+
 paths:
+
+  /health:
+    get:
+      tags: [Health]
+      summary: Health check
+      responses:
+        '200':
+          description: Service is healthy
+
   /auth/login:
     post:
-      summary: Application user login
+      tags: [Authentication]
+      summary: Login ADMIN or EMPLOYEE
+      description: |
+        `username` is users.user_id.
+
+        CUSTOMER and MASTER cannot use this endpoint.
       requestBody:
         required: true
         content:
@@ -16,31 +53,24 @@ paths:
             schema:
               $ref: '#/components/schemas/LoginRequest'
       responses:
-        '200': {description: Success}
-        '401': {description: Invalid credentials}
-
-  /auth/refresh:
-    post:
-      summary: Refresh application token
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/RefreshRequest'
-      responses:
-        '200': {description: Success}
-
-  /auth/logout:
-    post:
-      security: [{bearerAuth: []}]
-      responses:
-        '204': {description: Logged out}
+        '200':
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
 
   /master-auth/login:
     post:
-      summary: Login to separate Master Record Management UI
-      description: Credentials are manually provisioned in master_access_credentials.
+      tags: [Master Authentication]
+      summary: Login Master Record Management
+      description: |
+        MASTER is manually provisioned in the users table.
+        There is no public master-registration endpoint.
       requestBody:
         required: true
         content:
@@ -48,26 +78,41 @@ paths:
             schema:
               $ref: '#/components/schemas/LoginRequest'
       responses:
-        '200': {description: Master access granted}
-        '401': {description: Invalid master credentials}
+        '200':
+          description: Master login successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MasterLoginResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
 
   /master/users:
     post:
-      security: [{masterBearerAuth: []}]
-      summary: Create USER master record
+      tags: [Master Management]
+      summary: Create ADMIN or EMPLOYEE
+      security:
+        - masterBearer: []
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/CreateUserRequest'
+              $ref: '#/components/schemas/CreateApplicationUserRequest'
       responses:
-        '201': {description: Created}
+        '201':
+          description: User created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserResponse'
 
   /master/customers:
     post:
-      security: [{masterBearerAuth: []}]
+      tags: [Master Management]
       summary: Create CUSTOMER master record
+      security:
+        - masterBearer: []
       requestBody:
         required: true
         content:
@@ -75,37 +120,322 @@ paths:
             schema:
               $ref: '#/components/schemas/CreateCustomerRequest'
       responses:
-        '201': {description: Created}
+        '201':
+          description: Customer created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserResponse'
 
   /users:
     get:
-      security: [{bearerAuth: []}]
+      tags: [Users]
+      summary: List application users
+      security:
+        - applicationBearer: []
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - name: role
+          in: query
+          schema:
+            type: string
+            enum: [ADMIN, EMPLOYEE]
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [ACTIVE, INACTIVE, BLOCKED]
+        - name: search
+          in: query
+          schema:
+            type: string
       responses:
-        '200': {description: Users}
+        '200':
+          description: Users
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserListResponse'
 
   /customers:
     get:
-      security: [{bearerAuth: []}]
+      tags: [Customers]
+      summary: List customers
+      security:
+        - applicationBearer: []
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - name: search
+          in: query
+          schema:
+            type: string
       responses:
-        '200': {description: Customers}
+        '200':
+          description: Customers
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserListResponse'
 
   /properties:
     get:
-      security: [{bearerAuth: []}]
+      tags: [Properties]
+      summary: List properties
+      security:
+        - applicationBearer: []
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/PropertyStatus'
+        - name: category
+          in: query
+          schema:
+            $ref: '#/components/schemas/PropertyCategory'
+        - name: city
+          in: query
+          schema:
+            type: string
+        - name: search
+          in: query
+          schema:
+            type: string
       responses:
-        '200': {description: Properties}
+        '200':
+          description: Properties
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PropertyListResponse'
+
     post:
-      security: [{bearerAuth: []}]
+      tags: [Properties]
+      summary: Create property
+      security:
+        - applicationBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePropertyRequest'
       responses:
-        '201': {description: Created}
+        '201':
+          description: Property created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PropertyResponse'
+
+  /properties/{propertyId}:
+    get:
+      tags: [Properties]
+      summary: Get property
+      security:
+        - applicationBearer: []
+      parameters:
+        - $ref: '#/components/parameters/PropertyId'
+      responses:
+        '200':
+          description: Property
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PropertyDetailResponse'
+
+    patch:
+      tags: [Properties]
+      summary: Update property
+      security:
+        - applicationBearer: []
+      parameters:
+        - $ref: '#/components/parameters/PropertyId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdatePropertyRequest'
+      responses:
+        '200':
+          description: Updated property
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PropertyResponse'
+
+  /attachments/upload-url:
+    post:
+      tags: [Attachments]
+      summary: Create a short-lived Cloudflare R2 upload authorization
+      description: |
+        Unified file upload endpoint.
+
+        Use `attachmentType=PHOTO` for property photos,
+        `attachmentType=DOCUMENT` for 7/12 and other property documents,
+        `attachmentType=RECORDING` for inquiry call recordings.
+
+        The backend validates resource ownership/authorization and returns
+        a short-lived upload URL and generated R2 object key.
+      security:
+        - applicationBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateAttachmentUploadRequest'
+      responses:
+        '200':
+          description: R2 upload authorization
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UploadUrlResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '413':
+          description: File too large
+
+  /attachments:
+    post:
+      tags: [Attachments]
+      summary: Finalize an uploaded attachment
+      description: |
+        The client calls this endpoint after uploading the binary to R2.
+
+        The backend verifies the expected object and creates one row in the
+        `attachments` table.
+      security:
+        - applicationBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FinalizeAttachmentRequest'
+      responses:
+        '201':
+          description: Attachment metadata created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttachmentResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+
+    get:
+      tags: [Attachments]
+      summary: List attachments
+      description: |
+        Filter by propertyId, inquiryId and attachmentType.
+      security:
+        - applicationBearer: []
+      parameters:
+        - name: propertyId
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: inquiryId
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: attachmentType
+          in: query
+          schema:
+            $ref: '#/components/schemas/AttachmentType'
+      responses:
+        '200':
+          description: Attachments
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttachmentListResponse'
+
+  /attachments/{attachmentId}:
+    delete:
+      tags: [Attachments]
+      summary: Delete attachment
+      description: |
+        Deletes the attachment metadata and performs the corresponding
+        authorized Cloudflare R2 object deletion.
+      security:
+        - applicationBearer: []
+      parameters:
+        - $ref: '#/components/parameters/AttachmentId'
+      responses:
+        '204':
+          description: Deleted
+        '404':
+          $ref: '#/components/responses/NotFound'
 
   /inquiries:
     get:
-      security: [{bearerAuth: []}]
+      tags: [Inquiries]
+      summary: List inquiries
+      security:
+        - applicationBearer: []
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/InquiryStatus'
+        - name: priority
+          in: query
+          schema:
+            $ref: '#/components/schemas/InquiryPriority'
+        - name: assignedToUserId
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: handledByUserId
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: customerId
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: propertyId
+          in: query
+          schema:
+            type: string
+            format: uuid
       responses:
-        '200': {description: Inquiries}
+        '200':
+          description: Inquiries
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InquiryListResponse'
+
     post:
-      security: [{bearerAuth: []}]
+      tags: [Inquiries]
+      summary: Create inquiry
+      description: |
+        Creator is derived from the authenticated JWT.
+
+        ADMIN:
+        At least one RECORDING attachment associated with this inquiry is
+        required before creation is considered complete.
+
+        EMPLOYEE:
+        Recording is optional.
+
+        The client must not send a creator role for authorization.
+      security:
+        - applicationBearer: []
       requestBody:
         required: true
         content:
@@ -113,26 +443,67 @@ paths:
             schema:
               $ref: '#/components/schemas/CreateInquiryRequest'
       responses:
-        '201': {description: Created}
-        '400': {description: Validation error}
-        '403': {description: Forbidden}
+        '201':
+          description: Inquiry created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InquiryDetailResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
 
   /inquiries/{inquiryId}:
     get:
-      security: [{bearerAuth: []}]
-      parameters: [{name: inquiryId, in: path, required: true, schema: {type: string, format: uuid}}]
+      tags: [Inquiries]
+      summary: Get inquiry details
+      security:
+        - applicationBearer: []
+      parameters:
+        - $ref: '#/components/parameters/InquiryId'
       responses:
-        '200': {description: Inquiry}
+        '200':
+          description: Inquiry
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InquiryDetailResponse'
+
     patch:
-      security: [{bearerAuth: []}]
-      parameters: [{name: inquiryId, in: path, required: true, schema: {type: string, format: uuid}}]
+      tags: [Inquiries]
+      summary: Update inquiry
+      security:
+        - applicationBearer: []
+      parameters:
+        - $ref: '#/components/parameters/InquiryId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateInquiryRequest'
       responses:
-        '200': {description: Updated}
+        '200':
+          description: Updated inquiry
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InquiryDetailResponse'
 
   /inquiries/{inquiryId}/assign:
     post:
-      security: [{bearerAuth: []}]
-      parameters: [{name: inquiryId, in: path, required: true, schema: {type: string, format: uuid}}]
+      tags: [Inquiry Assignments]
+      summary: Assign or reassign inquiry
+      description: |
+        Updates inquiries.assigned_to_user_id and inserts an
+        inquiry_assignments history row in one database transaction.
+      security:
+        - applicationBearer: []
+      parameters:
+        - $ref: '#/components/parameters/InquiryId'
       requestBody:
         required: true
         content:
@@ -140,117 +511,918 @@ paths:
             schema:
               $ref: '#/components/schemas/AssignInquiryRequest'
       responses:
-        '200': {description: Assigned}
+        '200':
+          description: Assignment updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InquiryDetailResponse'
 
-  /inquiries/{inquiryId}/recordings:
-    post:
-      security: [{bearerAuth: []}]
-      parameters: [{name: inquiryId, in: path, required: true, schema: {type: string, format: uuid}}]
-      requestBody:
-        required: true
-        content:
-          multipart/form-data:
-            schema:
-              type: object
-              required: [file]
-              properties:
-                file: {type: string, format: binary}
-                description: {type: string}
+  /inquiries/{inquiryId}/assignments:
+    get:
+      tags: [Inquiry Assignments]
+      summary: Get assignment history
+      security:
+        - applicationBearer: []
+      parameters:
+        - $ref: '#/components/parameters/InquiryId'
       responses:
-        '201': {description: Uploaded}
+        '200':
+          description: Assignment history
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssignmentListResponse'
 
   /inquiries/{inquiryId}/public:
     patch:
-      security: [{bearerAuth: []}]
-      parameters: [{name: inquiryId, in: path, required: true, schema: {type: string, format: uuid}}]
+      tags: [Inquiries]
+      summary: Change public visibility
+      security:
+        - applicationBearer: []
+      parameters:
+        - $ref: '#/components/parameters/InquiryId'
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              type: object
-              required: [isPublic]
-              properties:
-                isPublic: {type: boolean}
+              $ref: '#/components/schemas/PublicVisibilityRequest'
       responses:
-        '200': {description: Updated}
+        '200':
+          description: Updated inquiry
 
   /public/properties:
     get:
-      summary: Public approved property listing
+      tags: [Public Properties]
+      summary: List publicly approved properties
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - name: category
+          in: query
+          schema:
+            $ref: '#/components/schemas/PropertyCategory'
+        - name: city
+          in: query
+          schema:
+            type: string
       responses:
-        '200': {description: Public property data}
+        '200':
+          description: Public properties
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublicPropertyListResponse'
 
 components:
+
   securitySchemes:
-    bearerAuth:
-      type: http
-      scheme: bearer
-      bearerFormat: JWT
-    masterBearerAuth:
+    applicationBearer:
       type: http
       scheme: bearer
       bearerFormat: JWT
 
+    masterBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    Page:
+      name: page
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+
+    PageSize:
+      name: pageSize
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+
+    PropertyId:
+      name: propertyId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+    InquiryId:
+      name: inquiryId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+    AttachmentId:
+      name: attachmentId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+  responses:
+    ValidationError:
+      description: Validation error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    Unauthorized:
+      description: Authentication failed
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    Forbidden:
+      description: Authorization failed
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    Conflict:
+      description: Business conflict
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
   schemas:
+
+    AttachmentType:
+      type: string
+      enum:
+        - PHOTO
+        - DOCUMENT
+        - RECORDING
+
+    DocumentType:
+      type: string
+      enum:
+        - SEVEN_TWELVE
+        - SALE_DEED
+        - PROPERTY_CARD
+        - NOC
+        - OTHER
+
+    PropertyCategory:
+      type: string
+      enum:
+        - RESIDENTIAL
+        - INDUSTRIAL
+        - COMMERCIAL
+        - AGRICULTURAL
+
+    PropertyStatus:
+      type: string
+      enum:
+        - AVAILABLE
+        - SOLD
+        - ON_HOLD
+        - INACTIVE
+
+    InquiryStatus:
+      type: string
+      enum:
+        - NEW
+        - IN_PROGRESS
+        - ON_HOLD
+        - COMPLETED
+        - CANCELLED
+
+    InquiryPriority:
+      type: string
+      enum:
+        - LOW
+        - MEDIUM
+        - HIGH
+        - URGENT
+
     LoginRequest:
       type: object
       required: [username, password]
       properties:
-        username: {type: string}
-        password: {type: string, format: password}
+        username:
+          type: string
+          example: EMP001
+        password:
+          type: string
+          format: password
 
-    RefreshRequest:
+    LoginResponse:
       type: object
-      required: [refreshToken]
+      required: [success, data]
       properties:
-        refreshToken: {type: string}
+        success:
+          type: boolean
+        data:
+          type: object
+          required: [accessToken, user]
+          properties:
+            accessToken:
+              type: string
+            tokenType:
+              type: string
+              example: Bearer
+            expiresIn:
+              type: integer
+              example: 3600
+            user:
+              $ref: '#/components/schemas/User'
 
-    CreateUserRequest:
+    MasterLoginResponse:
       type: object
-      required: [name, mobile, password, roleId]
+      required: [success, data]
       properties:
-        name: {type: string}
-        email: {type: string, format: email}
-        mobile: {type: string}
-        alternateMobile: {type: string}
-        address: {type: string}
-        city: {type: string}
-        state: {type: string}
-        pincode: {type: string}
-        password: {type: string, format: password}
-        roleId: {type: string, format: uuid}
+        success:
+          type: boolean
+        data:
+          type: object
+          required: [accessToken, tokenScope]
+          properties:
+            accessToken:
+              type: string
+            tokenType:
+              type: string
+              example: Bearer
+            tokenScope:
+              type: string
+              example: MASTER
+            expiresIn:
+              type: integer
+              example: 3600
+
+    CreateApplicationUserRequest:
+      type: object
+      required: [name, mobile, password, role]
+      properties:
+        userId:
+          type: string
+          example: EMP001
+        name:
+          type: string
+        email:
+          type: string
+          format: email
+        mobile:
+          type: string
+        alternateMobile:
+          type: string
+        address:
+          type: string
+        city:
+          type: string
+        state:
+          type: string
+        pincode:
+          type: string
+        password:
+          type: string
+          format: password
+          minLength: 8
+        role:
+          type: string
+          enum: [ADMIN, EMPLOYEE]
 
     CreateCustomerRequest:
       type: object
       required: [name, mobile]
       properties:
-        name: {type: string}
-        email: {type: string, format: email}
-        mobile: {type: string}
-        alternateMobile: {type: string}
-        address: {type: string}
-        city: {type: string}
-        state: {type: string}
-        pincode: {type: string}
+        name:
+          type: string
+        email:
+          type: string
+          format: email
+        mobile:
+          type: string
+        alternateMobile:
+          type: string
+        address:
+          type: string
+        city:
+          type: string
+        state:
+          type: string
+        pincode:
+          type: string
+
+    User:
+      type: object
+      required: [id, userType, name, status]
+      properties:
+        id:
+          type: string
+          format: uuid
+        userId:
+          type: string
+          nullable: true
+        userType:
+          type: string
+          enum: [APPLICATION_USER, CUSTOMER, MASTER]
+        role:
+          type: string
+          nullable: true
+          enum: [ADMIN, EMPLOYEE]
+        name:
+          type: string
+        email:
+          type: string
+          nullable: true
+        mobile:
+          type: string
+          nullable: true
+        status:
+          type: string
+          enum: [ACTIVE, INACTIVE, BLOCKED]
+
+    UserResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+        data:
+          $ref: '#/components/schemas/User'
+
+    UserListResponse:
+      type: object
+      required: [success, data, pagination]
+      properties:
+        success:
+          type: boolean
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/User'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+
+    CreatePropertyRequest:
+      type: object
+      required: [propertyType, category]
+      properties:
+        propertyCode:
+          type: string
+        propertyType:
+          type: string
+        category:
+          $ref: '#/components/schemas/PropertyCategory'
+        area:
+          type: number
+          minimum: 0
+        areaUnit:
+          type: string
+        price:
+          type: number
+          minimum: 0
+        priceUnit:
+          type: string
+        gatNoDetails:
+          type: string
+        description:
+          type: string
+        address:
+          type: string
+        locality:
+          type: string
+        city:
+          type: string
+        state:
+          type: string
+        pincode:
+          type: string
+        latitude:
+          type: number
+          minimum: -90
+          maximum: 90
+        longitude:
+          type: number
+          minimum: -180
+          maximum: 180
+        mapUrl:
+          type: string
+          format: uri
+
+    UpdatePropertyRequest:
+      allOf:
+        - $ref: '#/components/schemas/CreatePropertyRequest'
+      properties:
+        status:
+          $ref: '#/components/schemas/PropertyStatus'
+
+    Property:
+      type: object
+      required: [id, propertyCode, propertyType, category, status]
+      properties:
+        id:
+          type: string
+          format: uuid
+        propertyCode:
+          type: string
+        propertyType:
+          type: string
+        category:
+          $ref: '#/components/schemas/PropertyCategory'
+        area:
+          type: number
+          nullable: true
+        areaUnit:
+          type: string
+          nullable: true
+        price:
+          type: number
+          nullable: true
+        priceUnit:
+          type: string
+          nullable: true
+        gatNoDetails:
+          type: string
+          nullable: true
+        description:
+          type: string
+          nullable: true
+        address:
+          type: string
+          nullable: true
+        locality:
+          type: string
+          nullable: true
+        city:
+          type: string
+          nullable: true
+        state:
+          type: string
+          nullable: true
+        pincode:
+          type: string
+          nullable: true
+        latitude:
+          type: number
+          nullable: true
+        longitude:
+          type: number
+          nullable: true
+        mapUrl:
+          type: string
+          nullable: true
+        status:
+          $ref: '#/components/schemas/PropertyStatus'
+
+    PropertyResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+        data:
+          $ref: '#/components/schemas/Property'
+
+    PropertyDetailResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+        data:
+          allOf:
+            - $ref: '#/components/schemas/Property'
+            - type: object
+              properties:
+                attachments:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/Attachment'
+
+    PropertyListResponse:
+      type: object
+      required: [success, data, pagination]
+      properties:
+        success:
+          type: boolean
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Property'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+
+    CreateAttachmentUploadRequest:
+      type: object
+      required:
+        - attachmentType
+        - fileName
+        - mimeType
+        - fileSizeBytes
+      properties:
+        attachmentType:
+          $ref: '#/components/schemas/AttachmentType'
+        propertyId:
+          type: string
+          format: uuid
+          nullable: true
+        inquiryId:
+          type: string
+          format: uuid
+          nullable: true
+        documentType:
+          $ref: '#/components/schemas/DocumentType'
+        fileName:
+          type: string
+        mimeType:
+          type: string
+        fileSizeBytes:
+          type: integer
+          minimum: 1
+        isPrimary:
+          type: boolean
+          default: false
+
+    FinalizeAttachmentRequest:
+      type: object
+      required:
+        - attachmentType
+        - fileName
+        - mimeType
+        - fileSizeBytes
+        - r2ObjectKey
+      properties:
+        attachmentType:
+          $ref: '#/components/schemas/AttachmentType'
+        propertyId:
+          type: string
+          format: uuid
+          nullable: true
+        inquiryId:
+          type: string
+          format: uuid
+          nullable: true
+        documentType:
+          $ref: '#/components/schemas/DocumentType'
+        fileName:
+          type: string
+        mimeType:
+          type: string
+        fileSizeBytes:
+          type: integer
+          minimum: 1
+        r2ObjectKey:
+          type: string
+        isPrimary:
+          type: boolean
+          default: false
+        displayOrder:
+          type: integer
+          default: 0
+
+    Attachment:
+      type: object
+      required:
+        - id
+        - attachmentType
+        - fileName
+        - mimeType
+        - fileSizeBytes
+        - r2ObjectKey
+      properties:
+        id:
+          type: string
+          format: uuid
+        propertyId:
+          type: string
+          format: uuid
+          nullable: true
+        inquiryId:
+          type: string
+          format: uuid
+          nullable: true
+        attachmentType:
+          $ref: '#/components/schemas/AttachmentType'
+        documentType:
+          $ref: '#/components/schemas/DocumentType'
+        fileName:
+          type: string
+        mimeType:
+          type: string
+        fileSizeBytes:
+          type: integer
+          description: Attachment size in bytes.
+        r2Bucket:
+          type: string
+        r2ObjectKey:
+          type: string
+        fileUrl:
+          type: string
+          nullable: true
+        isPrimary:
+          type: boolean
+        displayOrder:
+          type: integer
+        uploadedBy:
+          type: string
+          format: uuid
+        createdAt:
+          type: string
+          format: date-time
+
+    AttachmentResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+        data:
+          $ref: '#/components/schemas/Attachment'
+
+    AttachmentListResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Attachment'
+
+    UploadUrlResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+        data:
+          type: object
+          required: [uploadUrl, r2ObjectKey, expiresIn]
+          properties:
+            uploadUrl:
+              type: string
+              format: uri
+            r2ObjectKey:
+              type: string
+            expiresIn:
+              type: integer
+              example: 900
 
     CreateInquiryRequest:
       type: object
+      required: [customerId, propertyId]
       properties:
-        customerId: {type: string, format: uuid}
-        propertyId: {type: string, format: uuid}
-        type: {type: string}
-        priority:
+        customerId:
           type: string
-          enum: [LOW, MEDIUM, HIGH, URGENT]
-        externalReference: {type: string}
-        handledByUserId: {type: string, format: uuid}
-        assignedToUserId: {type: string, format: uuid}
-        remarks: {type: string}
+          format: uuid
+        propertyId:
+          type: string
+          format: uuid
+        type:
+          type: string
+        priority:
+          $ref: '#/components/schemas/InquiryPriority'
+        externalReference:
+          type: string
+        handledByUserId:
+          type: string
+          format: uuid
+          nullable: true
+        assignedToUserId:
+          type: string
+          format: uuid
+          nullable: true
+        remarks:
+          type: string
+
+    UpdateInquiryRequest:
+      type: object
+      properties:
+        customerId:
+          type: string
+          format: uuid
+        propertyId:
+          type: string
+          format: uuid
+        type:
+          type: string
+        priority:
+          $ref: '#/components/schemas/InquiryPriority'
+        status:
+          $ref: '#/components/schemas/InquiryStatus'
+        externalReference:
+          type: string
+        handledByUserId:
+          type: string
+          format: uuid
+        assignedToUserId:
+          type: string
+          format: uuid
+        remarks:
+          type: string
 
     AssignInquiryRequest:
       type: object
       required: [assignedToUserId]
       properties:
-        assignedToUserId: {type: string, format: uuid}
-        reason: {type: string}
+        assignedToUserId:
+          type: string
+          format: uuid
+        reason:
+          type: string
+
+    PublicVisibilityRequest:
+      type: object
+      required: [isPublic]
+      properties:
+        isPublic:
+          type: boolean
+
+    Inquiry:
+      type: object
+      required: [id, inquiryNumber, customerId, priority, status, isPublic]
+      properties:
+        id:
+          type: string
+          format: uuid
+        inquiryNumber:
+          type: string
+        customerId:
+          type: string
+          format: uuid
+        propertyId:
+          type: string
+          format: uuid
+          nullable: true
+        type:
+          type: string
+          nullable: true
+        priority:
+          $ref: '#/components/schemas/InquiryPriority'
+        status:
+          $ref: '#/components/schemas/InquiryStatus'
+        externalReference:
+          type: string
+          nullable: true
+        handledByUserId:
+          type: string
+          format: uuid
+          nullable: true
+        assignedToUserId:
+          type: string
+          format: uuid
+          nullable: true
+        remarks:
+          type: string
+          nullable: true
+        isPublic:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    InquiryDetailResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+        data:
+          allOf:
+            - $ref: '#/components/schemas/Inquiry'
+            - type: object
+              properties:
+                customer:
+                  $ref: '#/components/schemas/User'
+                property:
+                  $ref: '#/components/schemas/Property'
+                attachments:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/Attachment'
+
+    InquiryListResponse:
+      type: object
+      required: [success, data, pagination]
+      properties:
+        success:
+          type: boolean
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Inquiry'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+
+    Assignment:
+      type: object
+      required: [id, inquiryId, assignedToUserId, assignedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        inquiryId:
+          type: string
+          format: uuid
+        assignedFromUserId:
+          type: string
+          format: uuid
+          nullable: true
+        assignedToUserId:
+          type: string
+          format: uuid
+        assignedAt:
+          type: string
+          format: date-time
+        reason:
+          type: string
+          nullable: true
+        createdBy:
+          type: string
+          format: uuid
+
+    AssignmentListResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Assignment'
+
+    PublicPropertyListResponse:
+      type: object
+      required: [success, data, pagination]
+      properties:
+        success:
+          type: boolean
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Property'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+
+    Pagination:
+      type: object
+      required: [page, pageSize, total, totalPages]
+      properties:
+        page:
+          type: integer
+        pageSize:
+          type: integer
+        total:
+          type: integer
+        totalPages:
+          type: integer
+
+    ErrorResponse:
+      type: object
+      required: [success, error]
+      properties:
+        success:
+          type: boolean
+          example: false
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            details:
+              type: array
+              items:
+                type: object
+                additionalProperties: true
+        requestId:
+          type: string
+
+    SuccessResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          type: object
+          additionalProperties: true
