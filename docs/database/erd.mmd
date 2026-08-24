@@ -47,6 +47,7 @@ erDiagram
         decimal longitude
         text map_url
         enum status
+        boolean is_public
     }
 
     INQUIRIES {
@@ -62,6 +63,7 @@ erDiagram
         uuid assigned_to_user_id FK
         text remarks
         boolean is_public
+        timestamptz submitted_at
     }
 
     ATTACHMENTS {

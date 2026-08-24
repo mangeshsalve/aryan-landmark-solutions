@@ -493,6 +493,47 @@ paths:
               schema:
                 $ref: '#/components/schemas/InquiryDetailResponse'
 
+  /inquiries/{inquiryId}/submit:
+    post:
+      tags: [Inquiries]
+      summary: Submit an inquiry
+      description: |
+        Submit an existing inquiry after validating that all mandatory
+        requirements are satisfied.
+
+        Sets inquiries.submitted_at to the current time. Fails with a
+        conflict if the inquiry has already been submitted
+        (submitted_at is already set).
+
+        If the inquiry's creator (created_by) is an ADMIN, at least one
+        RECORDING attachment for this inquiry is required, or the
+        request is rejected. If the creator is an EMPLOYEE, the
+        recording is optional. The creator's role is read from the
+        inquiry's created_by user, not from the caller submitting it —
+        an EMPLOYEE may submit an ADMIN-created inquiry and the ADMIN
+        recording requirement still applies, and vice versa.
+      security:
+        - applicationBearer: []
+      parameters:
+        - $ref: '#/components/parameters/InquiryId'
+      responses:
+        '200':
+          description: Inquiry submitted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InquiryDetailResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          description: ADMIN inquiry submitted without a required recording
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /inquiries/{inquiryId}/assign:
     post:
       tags: [Inquiry Assignments]
@@ -556,6 +597,10 @@ paths:
     get:
       tags: [Public Properties]
       summary: List publicly approved properties
+      description: |
+        Returns properties where isPublic=true AND status=AVAILABLE.
+        isPublic alone is not sufficient — a property marked isPublic but
+        no longer AVAILABLE (e.g. SOLD) is not returned. Unauthenticated.
       parameters:
         - $ref: '#/components/parameters/Page'
         - $ref: '#/components/parameters/PageSize'
@@ -928,10 +973,17 @@ components:
       properties:
         status:
           $ref: '#/components/schemas/PropertyStatus'
+        isPublic:
+          type: boolean
+          description: |
+            Controls whether this property appears in
+            GET /public/properties (also requires status=AVAILABLE).
+            ADMIN only — an EMPLOYEE-authenticated request that includes
+            this field is rejected.
 
     Property:
       type: object
-      required: [id, propertyCode, propertyType, category, status]
+      required: [id, propertyCode, propertyType, category, status, isPublic]
       properties:
         id:
           type: string
@@ -986,6 +1038,8 @@ components:
           nullable: true
         status:
           $ref: '#/components/schemas/PropertyStatus'
+        isPublic:
+          type: boolean
 
     PropertyResponse:
       type: object
@@ -1291,6 +1345,14 @@ components:
           nullable: true
         isPublic:
           type: boolean
+        submittedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: |
+            NULL until the inquiry has been submitted via
+            POST /inquiries/{inquiryId}/submit. Never settable through
+            create/update requests.
         createdAt:
           type: string
           format: date-time
@@ -1369,6 +1431,35 @@ components:
           items:
             $ref: '#/components/schemas/Assignment'
 
+    PublicPhoto:
+      type: object
+      required: [id, fileUrl, isPrimary, displayOrder]
+      description: |
+        A PHOTO attachment as exposed to public visitors — deliberately a
+        narrower shape than Attachment: no r2Bucket/r2ObjectKey (internal
+        storage details) and no uploadedBy (employee information).
+      properties:
+        id:
+          type: string
+          format: uuid
+        fileUrl:
+          type: string
+          nullable: true
+        isPrimary:
+          type: boolean
+        displayOrder:
+          type: integer
+
+    PublicProperty:
+      allOf:
+        - $ref: '#/components/schemas/Property'
+        - type: object
+          properties:
+            photos:
+              type: array
+              items:
+                $ref: '#/components/schemas/PublicPhoto'
+
     PublicPropertyListResponse:
       type: object
       required: [success, data, pagination]
@@ -1378,7 +1469,7 @@ components:
         data:
           type: array
           items:
-            $ref: '#/components/schemas/Property'
+            $ref: '#/components/schemas/PublicProperty'
         pagination:
           $ref: '#/components/schemas/Pagination'
 
