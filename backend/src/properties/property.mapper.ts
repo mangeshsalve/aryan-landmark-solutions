@@ -25,6 +25,7 @@ export interface PublicProperty {
   longitude: number | null;
   mapUrl: string | null;
   status: PropertyStatusValue;
+  isPublic: boolean;
 }
 
 interface PropertyRow {
@@ -47,6 +48,7 @@ interface PropertyRow {
   longitude: unknown;
   mapUrl: string | null;
   status: string;
+  isPublic: boolean;
 }
 
 function toNullableNumber(value: unknown): number | null {
@@ -78,5 +80,40 @@ export function toPublicProperty(row: PropertyRow): PublicProperty {
     longitude: toNullableNumber(row.longitude),
     mapUrl: row.mapUrl,
     status: row.status as PropertyStatusValue,
+    isPublic: row.isPublic,
   };
+}
+
+/**
+ * Matches components.schemas.PublicPhoto in docs/api/openapi.yaml exactly
+ * — deliberately narrower than the internal Attachment shape: no
+ * r2Bucket/r2ObjectKey (internal storage details) and no uploadedBy
+ * (employee information), per Phase 8.1's public-exposure rules.
+ */
+export interface PublicPhoto {
+  id: string;
+  fileUrl: string | null;
+  isPrimary: boolean;
+  displayOrder: number;
+}
+
+interface PhotoAttachmentRow {
+  id: string;
+  fileUrl: string | null;
+  isPrimary: boolean;
+  displayOrder: number;
+}
+
+export function toPublicPhoto(row: PhotoAttachmentRow): PublicPhoto {
+  return {
+    id: row.id,
+    fileUrl: row.fileUrl,
+    isPrimary: row.isPrimary,
+    displayOrder: row.displayOrder,
+  };
+}
+
+/** Matches components.schemas.PublicProperty (Property + photos) exactly. */
+export interface PublicPropertyListing extends PublicProperty {
+  photos: PublicPhoto[];
 }

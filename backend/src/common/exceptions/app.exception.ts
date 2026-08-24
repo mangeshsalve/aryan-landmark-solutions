@@ -44,6 +44,12 @@ export class ForbiddenRoleException extends AppException {
   }
 }
 
+export class ApplicationUserDuplicateException extends AppException {
+  constructor(message = 'An application user with this identity already exists.') {
+    super('CONFLICT', message, HttpStatus.CONFLICT);
+  }
+}
+
 export class CustomerNotFoundException extends AppException {
   constructor() {
     super('CUSTOMER_NOT_FOUND', 'Customer not found.', HttpStatus.NOT_FOUND);
@@ -95,5 +101,43 @@ export class StorageFinalizationFailedException extends AppException {
 export class AttachmentRelationshipInvalidException extends AppException {
   constructor(message: string) {
     super('VALIDATION_ERROR', message, HttpStatus.BAD_REQUEST);
+  }
+}
+
+export class InquiryNotFoundException extends AppException {
+  constructor() {
+    super('INQUIRY_NOT_FOUND', 'Inquiry not found.', HttpStatus.NOT_FOUND);
+  }
+}
+
+export class UserNotFoundException extends AppException {
+  constructor(message = 'Referenced user not found.') {
+    super('USER_NOT_FOUND', message, HttpStatus.NOT_FOUND);
+  }
+}
+
+export class InquiryAssignmentInvalidException extends AppException {
+  constructor(message: string) {
+    super('INQUIRY_ASSIGNMENT_INVALID', message, HttpStatus.BAD_REQUEST);
+  }
+}
+
+/**
+ * ADMIN-created inquiries require at least one RECORDING attachment (see
+ * database-design.md's "Call recording rule" and api-conventions.md's
+ * "Inquiry recording rule"). 422 (not 400): the request is well-formed,
+ * it fails a business-state precondition.
+ */
+export class InquiryRecordingRequiredException extends AppException {
+  constructor(
+    message = 'At least one RECORDING attachment is required for an inquiry created by an ADMIN.',
+  ) {
+    super('INQUIRY_RECORDING_REQUIRED', message, HttpStatus.UNPROCESSABLE_ENTITY);
+  }
+}
+
+export class InquiryAlreadySubmittedException extends AppException {
+  constructor(message = 'This inquiry has already been submitted.') {
+    super('CONFLICT', message, HttpStatus.CONFLICT);
   }
 }

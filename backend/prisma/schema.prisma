@@ -165,6 +165,12 @@ model Property {
 
   status    PropertyStatus @default(AVAILABLE)
 
+  // Public-website visibility — distinct from Inquiry.isPublic (see
+  // schema.sql / database-design.md). GET /public/properties requires
+  // isPublic=true AND status=AVAILABLE; only an ADMIN may set this
+  // (PropertiesService.update).
+  isPublic Boolean @default(false) @map("is_public")
+
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
@@ -179,6 +185,7 @@ model Property {
   @@index([status], map: "idx_properties_status")
   @@index([city], map: "idx_properties_city")
   @@index([category], map: "idx_properties_category")
+  @@index([isPublic], map: "idx_properties_public")
   @@map("properties")
 }
 
@@ -207,6 +214,13 @@ model Inquiry {
 
   remarks  String?
   isPublic Boolean @default(false) @map("is_public")
+
+  // NULL = not yet submitted; non-NULL = submitted, at the recorded time.
+  // Only ever set by InquiriesService.submit() — never accepted from a
+  // create/update request body (see CreateInquiryDto/UpdateInquiryDto,
+  // which deliberately omit it; the global ValidationPipe's
+  // forbidNonWhitelisted rejects any attempt to send it).
+  submittedAt DateTime? @map("submitted_at") @db.Timestamptz(6)
 
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)

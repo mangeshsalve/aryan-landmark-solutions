@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { Prisma } from '@prisma/client';
 import {
   AttachmentNotFoundException,
   AttachmentRelationshipInvalidException,
@@ -101,7 +102,7 @@ export class AttachmentsService {
     const bucket = this.storageService.getBucketName();
     const fileUrl = this.storageService.getPublicUrl(dto.r2ObjectKey) ?? null;
 
-    const created = await this.prisma.$transaction(async (tx: PrismaService) => {
+    const created = await this.prisma.$transaction(async (tx: Prisma.TransactionClient) => {
       // uq_property_primary_photo (schema.sql) is a partial unique index
       // Prisma's DSL can't express and — since no migration has ever run
       // in this environment (see Phase 5 report) — isn't guaranteed to

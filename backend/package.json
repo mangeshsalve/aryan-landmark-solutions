@@ -1,7 +1,7 @@
 {
   "name": "aryan-landmark-backend",
   "version": "0.1.0",
-  "description": "Aryan Landmark Solutions — production backend (Phase 1: foundation only)",
+  "description": "Aryan Landmark Solutions — production backend",
   "private": true,
   "license": "UNLICENSED",
   "scripts": {
@@ -45,8 +45,7 @@
     "pino-http": "^10.3.0",
     "pino-pretty": "^11.3.0",
     "reflect-metadata": "^0.2.2",
-    "rxjs": "^7.8.1",
-    "uuid": "^11.0.3"
+    "rxjs": "^7.8.1"
   },
   "devDependencies": {
     "@nestjs/cli": "^10.4.9",
@@ -57,7 +56,6 @@
     "@types/jest": "^29.5.14",
     "@types/node": "^22.10.2",
     "@types/supertest": "^6.0.2",
-    "@types/uuid": "^10.0.0",
     "@typescript-eslint/eslint-plugin": "^8.18.1",
     "@typescript-eslint/parser": "^8.18.1",
     "eslint": "^8.57.1",

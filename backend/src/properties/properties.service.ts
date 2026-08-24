@@ -1,15 +1,23 @@
 import { Injectable } from '@nestjs/common';
 import {
+  ForbiddenRoleException,
   PropertyDuplicateException,
   PropertyNotFoundException,
 } from '../common/exceptions/app.exception';
+import { ApplicationRoleValue } from '../common/types/domain-enums';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { CreatePropertyDto } from './dto/create-property.dto';
 import { ListPropertiesQueryDto } from './dto/list-properties-query.dto';
+import { ListPublicPropertiesQueryDto } from './dto/list-public-properties-query.dto';
 import { UpdatePropertyDto } from './dto/update-property.dto';
 import { generatePropertyCode } from './property-code.util';
-import { PublicProperty, toPublicProperty } from './property.mapper';
+import {
+  PublicProperty,
+  PublicPropertyListing,
+  toPublicPhoto,
+  toPublicProperty,
+} from './property.mapper';
 
 export interface PaginatedResult<T> {
   data: T[];
@@ -18,6 +26,7 @@ export interface PaginatedResult<T> {
 
 interface Actor {
   userId: string;
+  role: ApplicationRoleValue;
   ipAddress?: string;
   userAgent?: string;
 }
@@ -68,6 +77,68 @@ export class PropertiesService {
 
     return {
       data: rows.map(toPublicProperty),
+      pagination: {
+        page,
+        pageSize,
+        total,
+        totalPages: Math.max(1, Math.ceil(total / pageSize)),
+      },
+    };
+  }
+
+  /**
+   * GET /public/properties (Phase 8/8.1) — unauthenticated, for website
+   * visitors. Reuses this same service/mapper rather than duplicating
+   * property query logic, but is a separate method (not a change to
+   * list()) so internal ADMIN/EMPLOYEE listing behavior is untouched.
+   *
+   * Requires BOTH isPublic=true AND status=AVAILABLE — isPublic alone is
+   * not sufficient (an ADMIN could mark a SOLD property isPublic without
+   * intending it to reappear here). Also includes PHOTO attachments only
+   * (never DOCUMENT/RECORDING), mapped through toPublicPhoto() — a
+   * deliberately narrow shape with no r2Bucket/r2ObjectKey/uploadedBy.
+   */
+  async listPublic(
+    query: ListPublicPropertiesQueryDto,
+  ): Promise<PaginatedResult<PublicPropertyListing>> {
+    const page = query.page ?? 1;
+    const pageSize = query.pageSize ?? 20;
+
+    const where: Record<string, unknown> = { isPublic: true, status: 'AVAILABLE' };
+    if (query.category) where.category = query.category;
+    if (query.city) where.city = { equals: query.city, mode: 'insensitive' };
+
+    const [rows, total] = await Promise.all([
+      this.prisma.property.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+      }),
+      this.prisma.property.count({ where }),
+    ]);
+
+    const propertyIds = rows.map((row) => row.id);
+    const photos = propertyIds.length
+      ? await this.prisma.attachment.findMany({
+          where: { propertyId: { in: propertyIds }, attachmentType: 'PHOTO' },
+          orderBy: [{ displayOrder: 'asc' }, { createdAt: 'desc' }],
+        })
+      : [];
+
+    const photosByProperty = new Map<string, typeof photos>();
+    for (const photo of photos) {
+      if (!photo.propertyId) continue;
+      const bucket = photosByProperty.get(photo.propertyId) ?? [];
+      bucket.push(photo);
+      photosByProperty.set(photo.propertyId, bucket);
+    }
+
+    return {
+      data: rows.map((row) => ({
+        ...toPublicProperty(row),
+        photos: (photosByProperty.get(row.id) ?? []).map(toPublicPhoto),
+      })),
       pagination: {
         page,
         pageSize,
@@ -131,6 +202,14 @@ export class PropertiesService {
       throw new PropertyNotFoundException();
     }
 
+    // isPublic is ADMIN-only (Phase 8.1) — role comes from the verified
+    // JWT (see PropertiesController), never trusted from the request
+    // body. EMPLOYEE has full property update access otherwise; this is
+    // the one field carved out of that.
+    if (dto.isPublic !== undefined && actor.role !== 'ADMIN') {
+      throw new ForbiddenRoleException();
+    }
+
     if (dto.propertyCode && dto.propertyCode !== existing.propertyCode) {
       const conflict = await this.prisma.property.findUnique({
         where: { propertyCode: dto.propertyCode },
@@ -145,6 +224,7 @@ export class PropertiesService {
       propertyType: existing.propertyType,
       category: existing.category,
       status: existing.status,
+      isPublic: existing.isPublic,
     };
 
     const updated = await this.prisma.property.update({
@@ -168,6 +248,7 @@ export class PropertiesService {
         longitude: dto.longitude ?? undefined,
         mapUrl: dto.mapUrl ?? undefined,
         status: dto.status ?? undefined,
+        isPublic: dto.isPublic ?? undefined,
         updatedByUserId: actor.userId,
       },
     });

@@ -118,29 +118,70 @@ suite), 0 failures, no known regressions.
   that matters — check what the current phase's instructions require
   auditing before adding new event types.
 
-## Environment note — Prisma engine binaries
+## Environment note — Prisma engine binaries and migration history
 
-Every phase so far was built in a sandboxed environment where
+Phases 1-8.1 were built in a sandboxed environment where
 `binaries.prisma.sh` was network-blocked, so `prisma validate`/
-`generate`/`migrate` have **never actually run successfully**. This
-means:
+`generate`/`migrate` never actually ran. The original 6 tables were
+therefore created by applying `docs/database/schema.sql` directly against
+Postgres, not through `prisma migrate` — every environment of this
+project prior to Phase 9B was set up this way.
 
-- No real Prisma migration exists yet — only the hand-written
-  `prisma/schema.prisma`.
-- Several PostgreSQL CHECK constraints and one partial unique index from
-  `schema.sql` (`chk_attachment_relationship`,
+**As of Phase 9B**, the Prisma engine binaries are reachable, and real
+migration history exists:
+
+- `prisma/migrations/20260101000000_baseline_initial_schema` — a
+  baseline migration representing the *original, pre-Phase-6* 6-table
+  schema (no `submitted_at`, no `properties.is_public`), including the
+  four CHECK constraints and two partial/expression unique indexes
+  (`chk_users_identity`, `uq_users_email`, the `properties`
+  numeric/coordinate CHECKs, `chk_attachment_relationship`,
   `chk_attachment_document_type`, `chk_attachment_size`,
-  `uq_property_primary_photo`) are **not expressible in Prisma's schema
-  DSL** and have only ever been enforced at the application layer
-  (service-level validation, a transaction for the primary-photo rule).
+  `uq_property_primary_photo`) that are **still not expressible in
+  Prisma's schema DSL** — `prisma/schema.prisma` itself doesn't declare
+  them, but this migration's raw SQL does.
+- `20260824000000_add_inquiry_submitted_at` (Phase 6) and
+  `20260824010000_add_property_is_public` (Phase 8.1) — additive
+  columns, unchanged.
 
-**If you have normal network access in Claude Code**, this is probably
-resolved automatically — run `npm run prisma:migrate:dev` for real,
-confirm it generates a client with the actual 6 models, and then
-hand-add the four constraints above into the generated migration SQL
-(their exact definitions are in `docs/database/schema.sql`, lines ~175–
-208). This has been a standing item since Phase 1 and is worth doing
-before Phase 6 adds more attachment-dependent logic.
+**`docs/database/schema.sql` is a current-schema reference document, not
+migration history.** It is kept up to date (it already includes
+`submitted_at` and `is_public`, added directly into the `CREATE TABLE`
+blocks in Phase 6/8.1) purely for readability. It must never be executed
+directly against a database Prisma is expected to manage — see its own
+header comment. **`npx prisma migrate deploy` is the only supported way
+to initialize or change a production database's schema.** Never
+`prisma db push` and never `prisma migrate reset` against a database that
+holds real data — both are explicitly unsupported for this project.
+
+Three bootstrap scenarios, verified in Phase 9C (see that report for the
+exact commands and real-database test transcripts):
+
+1. **Fresh, empty database** — `npx prisma migrate deploy` and nothing
+   else. Verified: applies all three migrations in order, reaches the
+   exact current schema. No manual `schema.sql` step, ever.
+2. **Existing historical database** (created from `schema.sql` as it was
+   *before* Phase 6 — i.e. it genuinely lacks `submitted_at` and
+   `properties.is_public`): mark the baseline as already applied, once,
+   without executing it, then deploy:
+   ```
+   npx prisma migrate resolve --applied 20260101000000_baseline_initial_schema
+   npx prisma migrate deploy
+   ```
+   Verified in Phase 9C on a database seeded from an older schema.sql
+   shape: the two incremental migrations then apply cleanly with no data
+   loss.
+3. **A database created by running the *current* `schema.sql` directly**
+   — this already contains `submitted_at`/`is_public` from the start.
+   **Do not** run the scenario-2 commands against it: `resolve --applied`
+   on the baseline would succeed, but the subsequent
+   `add_inquiry_submitted_at`/`add_property_is_public` migrations would
+   then fail with "column already exists" (`P3018`) — confirmed by a
+   real failing run in Phase 9C. There is no generic automatic repair for
+   this case (deliberately not built — the right column-by-column
+   assessment depends on exactly how that database was created). Anyone
+   in this situation needs an explicit, manual schema/migration alignment
+   review before marking anything as applied — do not guess.
 
 ## Open decisions flagged, not yet resolved
 

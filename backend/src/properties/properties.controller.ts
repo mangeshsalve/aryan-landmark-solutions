@@ -58,6 +58,7 @@ export class PropertiesController {
   ) {
     const property = await this.propertiesService.create(dto, {
       userId: user.sub,
+      role: user.role,
       ipAddress: req.ip,
       userAgent: normalizeUserAgent(req.headers['user-agent']),
     });
@@ -73,6 +74,7 @@ export class PropertiesController {
   ) {
     const property = await this.propertiesService.update(propertyId, dto, {
       userId: user.sub,
+      role: user.role,
       ipAddress: req.ip,
       userAgent: normalizeUserAgent(req.headers['user-agent']),
     });

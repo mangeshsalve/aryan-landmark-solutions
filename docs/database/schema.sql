@@ -1,6 +1,25 @@
 -- Aryan Landmark Solutions
 -- FINAL 6-TABLE POSTGRESQL REFERENCE SCHEMA
 -- Executable source of truth: prisma/schema.prisma
+--
+-- IMPORTANT (Phase 9C-fix):
+-- This file documents the CURRENT database schema for readability. It is
+-- NOT the Prisma migration history and must never be run directly against
+-- a database that Prisma will manage — doing so produces a database with
+-- no migration history, which `prisma migrate deploy` cannot safely adopt
+-- automatically (see CLAUDE.md's "Environment note" for why, and the
+-- exact supported bootstrap scenarios).
+--
+-- The only supported way to initialize or change a production database's
+-- schema is:
+--
+--     npx prisma migrate deploy
+--
+-- against `backend/prisma/migrations/`. Never substitute this file for
+-- that command. When this file changes, `backend/prisma/schema.prisma`
+-- and a corresponding migration are the actual mechanism of record —
+-- this file is updated afterward purely to stay readable as a snapshot
+-- of what the schema now looks like.
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
@@ -101,6 +120,12 @@ CREATE TABLE properties (
 
   status property_status NOT NULL DEFAULT 'AVAILABLE',
 
+  -- Property-level public-website visibility. Distinct from
+  -- inquiries.is_public — a property can have zero or many inquiries, so
+  -- that flag can't stand in for this one. Only an ADMIN may change it
+  -- (see PropertiesService.update).
+  is_public BOOLEAN NOT NULL DEFAULT FALSE,
+
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   created_by UUID REFERENCES users(id),
@@ -115,6 +140,7 @@ CREATE TABLE properties (
 CREATE INDEX idx_properties_status ON properties(status);
 CREATE INDEX idx_properties_city ON properties(city);
 CREATE INDEX idx_properties_category ON properties(category);
+CREATE INDEX idx_properties_public ON properties(is_public);
 
 CREATE TABLE inquiries (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -134,6 +160,10 @@ CREATE TABLE inquiries (
 
   remarks TEXT,
   is_public BOOLEAN NOT NULL DEFAULT FALSE,
+
+  -- NULL = not yet submitted; non-NULL = submitted, at the recorded time.
+  -- Only ever set by the POST /inquiries/{id}/submit operation.
+  submitted_at TIMESTAMPTZ,
 
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),

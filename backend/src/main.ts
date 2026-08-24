@@ -19,6 +19,13 @@ async function bootstrap() {
 
   app.setGlobalPrefix('api/v1');
 
+  // Without this, PrismaService.onModuleDestroy() (which calls
+  // $disconnect()) never runs on SIGTERM/SIGINT — Nest doesn't listen for
+  // OS shutdown signals unless explicitly told to. Matters for container
+  // orchestration (rolling deploys, scale-down): without it, the process
+  // is killed with the PostgreSQL connection still open.
+  app.enableShutdownHooks();
+
   app.use(helmet());
 
   app.enableCors({
@@ -42,7 +49,10 @@ async function bootstrap() {
   if (config.nodeEnv !== 'production') {
     const swaggerConfig = new DocumentBuilder()
       .setTitle('Aryan Landmark Solutions API')
-      .setDescription('Phase 1: foundation only. Business endpoints land in later phases.')
+      .setDescription(
+        'Authentication, master management, customers, properties, ' +
+          'attachments/R2, inquiries, assignment, and the public property API.',
+      )
       .setVersion('1.0.0')
       .addBearerAuth()
       .build();

@@ -9,5 +9,6 @@ import { AttachmentsService } from './attachments.service';
   imports: [AuthModule, AuditModule, StorageModule],
   controllers: [AttachmentsController],
   providers: [AttachmentsService],
+  exports: [AttachmentsService],
 })
 export class AttachmentsModule {}

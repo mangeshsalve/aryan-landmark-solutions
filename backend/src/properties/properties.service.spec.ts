@@ -1,6 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { AuditService } from '../audit/audit.service';
 import {
+  ForbiddenRoleException,
   PropertyDuplicateException,
   PropertyNotFoundException,
 } from '../common/exceptions/app.exception';
@@ -18,11 +19,12 @@ describe('PropertiesService (critical paths)', () => {
       create: jest.Mock;
       update: jest.Mock;
     };
+    attachment: { findMany: jest.Mock };
   };
   let audit: { record: jest.Mock };
 
-  const adminActor = { userId: 'admin-uuid-1' };
-  const employeeActor = { userId: 'employee-uuid-1' };
+  const adminActor = { userId: 'admin-uuid-1', role: 'ADMIN' as const };
+  const employeeActor = { userId: 'employee-uuid-1', role: 'EMPLOYEE' as const };
 
   const baseRow = {
     id: 'prop-1',
@@ -44,6 +46,7 @@ describe('PropertiesService (critical paths)', () => {
     longitude: null,
     mapUrl: null,
     status: 'AVAILABLE',
+    isPublic: false,
   };
 
   beforeEach(async () => {
@@ -56,6 +59,7 @@ describe('PropertiesService (critical paths)', () => {
         create: jest.fn(),
         update: jest.fn(),
       },
+      attachment: { findMany: jest.fn().mockResolvedValue([]) },
     };
     audit = { record: jest.fn().mockResolvedValue(undefined) };
 
@@ -179,5 +183,67 @@ describe('PropertiesService (critical paths)', () => {
         }),
       }),
     );
+  });
+
+  // Phase 8.1: GET /public/properties requires BOTH isPublic=true AND
+  // status=AVAILABLE — isPublic alone is not sufficient.
+  it('listPublic() requires isPublic=true AND status=AVAILABLE in the where clause', async () => {
+    prisma.property.findMany.mockResolvedValue([]);
+    prisma.property.count.mockResolvedValue(0);
+
+    await service.listPublic({ page: 1, pageSize: 20, category: 'RESIDENTIAL' });
+
+    expect(prisma.property.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { isPublic: true, status: 'AVAILABLE', category: 'RESIDENTIAL' },
+      }),
+    );
+  });
+
+  it('listPublic() includes only PHOTO attachments as photos, never DOCUMENT/RECORDING', async () => {
+    prisma.property.findMany.mockResolvedValue([{ ...baseRow, isPublic: true }]);
+    prisma.property.count.mockResolvedValue(1);
+    prisma.attachment.findMany.mockResolvedValue([
+      {
+        id: 'photo-1',
+        propertyId: 'prop-1',
+        fileUrl: 'https://cdn/photo1.jpg',
+        isPrimary: true,
+        displayOrder: 0,
+      },
+    ]);
+
+    const result = await service.listPublic({ page: 1, pageSize: 20 });
+
+    expect(prisma.attachment.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ attachmentType: 'PHOTO' }),
+      }),
+    );
+    expect(result.data[0].photos).toEqual([
+      { id: 'photo-1', fileUrl: 'https://cdn/photo1.jpg', isPrimary: true, displayOrder: 0 },
+    ]);
+    // No r2Bucket/r2ObjectKey/uploadedBy on the exposed photo shape.
+    expect(result.data[0].photos[0]).not.toHaveProperty('r2ObjectKey');
+    expect(result.data[0].photos[0]).not.toHaveProperty('uploadedBy');
+  });
+
+  // Phase 8.1: isPublic is ADMIN-only.
+  it('allows an ADMIN to set isPublic', async () => {
+    prisma.property.findUnique.mockResolvedValueOnce(baseRow);
+    prisma.property.update.mockResolvedValue({ ...baseRow, isPublic: true });
+
+    const result = await service.update('prop-1', { isPublic: true }, adminActor);
+
+    expect(result.isPublic).toBe(true);
+  });
+
+  it('rejects an EMPLOYEE trying to set isPublic', async () => {
+    prisma.property.findUnique.mockResolvedValueOnce(baseRow);
+
+    await expect(
+      service.update('prop-1', { isPublic: true }, employeeActor),
+    ).rejects.toBeInstanceOf(ForbiddenRoleException);
+    expect(prisma.property.update).not.toHaveBeenCalled();
   });
 });

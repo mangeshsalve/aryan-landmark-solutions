@@ -14,6 +14,8 @@ import { AuditModule } from './audit/audit.module';
 import { CustomersModule } from './customers/customers.module';
 import { PropertiesModule } from './properties/properties.module';
 import { AttachmentsModule } from './attachments/attachments.module';
+import { InquiriesModule } from './inquiries/inquiries.module';
+import { MasterModule } from './master/master.module';
 
 @Module({
   imports: [
@@ -34,6 +36,8 @@ import { AttachmentsModule } from './attachments/attachments.module';
     CustomersModule,
     PropertiesModule,
     AttachmentsModule,
+    InquiriesModule,
+    MasterModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: AllExceptionsFilter },

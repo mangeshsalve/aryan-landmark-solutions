@@ -48,12 +48,46 @@ cp .env.example .env
 
 ## Database
 
+`npx prisma migrate deploy` is the **only** supported way to create or
+change this database's schema. `docs/database/schema.sql` is a
+current-schema reference document, not migration history — never run it
+directly against a database Prisma is expected to manage. Never use
+`prisma db push` or `prisma migrate reset` against a database that holds
+real data; neither is supported for this project.
+
+**Scenario 1 — fresh, empty database** (new environment):
+
 ```bash
-npm run prisma:validate      # checks prisma/schema.prisma is well-formed
-npm run prisma:migrate:dev   # creates and applies the initial migration
-npm run prisma:generate      # regenerates the Prisma Client (also runs
-                              # automatically after migrate:dev)
+npm run prisma:validate        # checks prisma/schema.prisma is well-formed
+npx prisma migrate deploy      # applies all migrations in order, including
+                                # the baseline that creates all 6 tables
+npm run prisma:generate        # regenerates the Prisma Client
 ```
+
+**Scenario 2 — existing historical database**, created from
+`docs/database/schema.sql` *as it was before Phase 6* (i.e. it genuinely
+does not yet have `inquiries.submitted_at` or `properties.is_public`):
+the baseline migration must be marked as already applied, once,
+*without* executing it, before running `prisma migrate deploy` there:
+
+```bash
+npx prisma migrate resolve --applied 20260101000000_baseline_initial_schema
+npx prisma migrate deploy
+```
+
+**Scenario 3 — a database created by running the *current*
+`docs/database/schema.sql` directly** — do **not** use Scenario 2's
+commands here. That database already has `submitted_at`/`is_public` from
+the start, so after marking the baseline applied, the two incremental
+migrations would fail with "column already exists" (confirmed by a real
+test run — see Phase 9C's report). There is no automatic fix for this
+case; it needs a manual, explicit review of which columns actually exist
+before anything is marked as applied.
+
+Skipping the `resolve` step in Scenario 2 will make `migrate deploy` try
+to `CREATE TABLE` on tables that already exist and fail — see
+`CLAUDE.md`'s "Environment note" for the full explanation of all three
+scenarios.
 
 > **Note on this development environment:** `prisma validate` / `generate`
 > / `migrate` all shell out to download Prisma's Rust engine binaries from
