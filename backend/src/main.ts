@@ -54,8 +54,21 @@ async function bootstrap() {
           'attachments/R2, inquiries, assignment, and the public property API.',
       )
       .setVersion('1.0.0')
-      .addBearerAuth()
-      .build();
+      .addBearerAuth(  {
+          type: 'http',
+          scheme: 'bearer',
+          bearerFormat: 'JWT',
+        },
+        'application-jwt',
+      )
+      .addBearerAuth(
+        {
+          type: 'http',
+          scheme: 'bearer',
+          bearerFormat: 'JWT',
+        },
+        'master-jwt',
+      ).build();
     const document = SwaggerModule.createDocument(app, swaggerConfig);
     SwaggerModule.setup('api/v1/docs', app, document);
   }

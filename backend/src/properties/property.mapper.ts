@@ -48,7 +48,7 @@ interface PropertyRow {
   longitude: unknown;
   mapUrl: string | null;
   status: string;
-  isPublic: boolean;
+  isPublic: boolean | null;
 }
 
 function toNullableNumber(value: unknown): number | null {
@@ -80,7 +80,7 @@ export function toPublicProperty(row: PropertyRow): PublicProperty {
     longitude: toNullableNumber(row.longitude),
     mapUrl: row.mapUrl,
     status: row.status as PropertyStatusValue,
-    isPublic: row.isPublic,
+    isPublic: row.isPublic ?? false,
   };
 }
 

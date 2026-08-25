@@ -169,15 +169,74 @@ paths:
         - $ref: '#/components/parameters/PageSize'
         - name: search
           in: query
+          description: Matches against name, mobile, or email
           schema:
             type: string
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [ACTIVE, INACTIVE, BLOCKED]
       responses:
         '200':
           description: Customers
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/UserListResponse'
+                $ref: '#/components/schemas/CustomerListResponse'
+
+    post:
+      tags: [Customers]
+      summary: Create customer
+      description: |
+        Creates a customer master record (users.user_type = CUSTOMER).
+        Available to ADMIN and EMPLOYEE application users. createdBy is
+        derived from the authenticated JWT, never accepted from the
+        request body.
+      security:
+        - applicationBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCustomerRequest'
+      responses:
+        '201':
+          description: Customer created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CustomerResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /customers/{id}:
+    get:
+      tags: [Customers]
+      summary: Get customer details
+      security:
+        - applicationBearer: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Customer
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CustomerResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '404':
+          $ref: '#/components/responses/NotFound'
 
   /properties:
     get:
@@ -850,7 +909,7 @@ components:
 
     CreateCustomerRequest:
       type: object
-      required: [name, mobile]
+      required: [name]
       properties:
         name:
           type: string
@@ -869,6 +928,75 @@ components:
           type: string
         pincode:
           type: string
+
+    Customer:
+      type: object
+      description: |
+        Matches the actual response of CustomersService/customer.mapper.ts
+        exactly (a distinct shape from User — passwordHash, userId, and
+        role never apply to a CUSTOMER and are not part of this schema).
+      required: [id, userType, name, status, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        userType:
+          type: string
+          enum: [CUSTOMER]
+        name:
+          type: string
+        email:
+          type: string
+          nullable: true
+        mobile:
+          type: string
+          nullable: true
+        alternateMobile:
+          type: string
+          nullable: true
+        address:
+          type: string
+          nullable: true
+        city:
+          type: string
+          nullable: true
+        state:
+          type: string
+          nullable: true
+        pincode:
+          type: string
+          nullable: true
+        status:
+          type: string
+          enum: [ACTIVE, INACTIVE, BLOCKED]
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    CustomerResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+        data:
+          $ref: '#/components/schemas/Customer'
+
+    CustomerListResponse:
+      type: object
+      required: [success, data, pagination]
+      properties:
+        success:
+          type: boolean
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Customer'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
 
     User:
       type: object

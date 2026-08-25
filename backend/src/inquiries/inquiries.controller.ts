@@ -12,7 +12,7 @@ import {
   Req,
   UseGuards,
 } from '@nestjs/common';
-import { ApiTags } from '@nestjs/swagger';
+import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import type { Request } from 'express';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
@@ -36,6 +36,7 @@ import { InquiriesService } from './inquiries.service';
  */
 @ApiTags('Inquiries')
 @Controller('inquiries')
+@ApiBearerAuth('application-jwt')
 @UseGuards(JwtApplicationAuthGuard, RolesGuard)
 @Roles('ADMIN', 'EMPLOYEE')
 export class InquiriesController {
