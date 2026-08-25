@@ -1,4 +1,8 @@
-import { InquiryPriorityValue, InquiryStatusValue } from '../common/types/domain-enums';
+import {
+  InquiryPriorityValue,
+  InquiryStatusValue,
+  InquiryTypeValue,
+} from '../common/types/domain-enums';
 import { PublicAttachment } from '../attachments/attachment.mapper';
 import { PublicProperty } from '../properties/property.mapper';
 
@@ -20,7 +24,7 @@ export interface PublicInquiry {
   inquiryNumber: string;
   customerId: string;
   propertyId: string | null;
-  type: string | null;
+  type: InquiryTypeValue | null;
   priority: InquiryPriorityValue;
   status: InquiryStatusValue;
   externalReference: string | null;
@@ -28,6 +32,10 @@ export interface PublicInquiry {
   assignedToUserId: string | null;
   remarks: string | null;
   isPublic: boolean;
+  /** BUYER matching preferences (Phase 11) — see Phase 11 report Part 4/5/6. */
+  preferredCity: string | null;
+  preferredPincode: string | null;
+  maxBudget: number | null;
   submittedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
@@ -53,9 +61,17 @@ interface InquiryRow {
   assignedToUserId: string | null;
   remarks: string | null;
   isPublic: boolean;
+  preferredCity: string | null;
+  preferredPincode: string | null;
+  maxBudget: unknown; // Prisma Decimal at runtime — not JSON-serializable directly
   submittedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
+}
+
+function toNullableNumber(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  return Number(value);
 }
 
 export function toPublicInquiry(row: InquiryRow): PublicInquiry {
@@ -64,7 +80,7 @@ export function toPublicInquiry(row: InquiryRow): PublicInquiry {
     inquiryNumber: row.inquiryNumber,
     customerId: row.customerId,
     propertyId: row.propertyId,
-    type: row.type,
+    type: row.type as InquiryTypeValue | null,
     priority: row.priority as InquiryPriorityValue,
     status: row.status as InquiryStatusValue,
     externalReference: row.externalReference,
@@ -72,6 +88,9 @@ export function toPublicInquiry(row: InquiryRow): PublicInquiry {
     assignedToUserId: row.assignedToUserId,
     remarks: row.remarks,
     isPublic: row.isPublic,
+    preferredCity: row.preferredCity,
+    preferredPincode: row.preferredPincode,
+    maxBudget: toNullableNumber(row.maxBudget),
     submittedAt: row.submittedAt,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,

@@ -125,6 +125,12 @@ export class InquiriesController {
     return { success: true, data: assignments };
   }
 
+  @Get(':inquiryId/matches')
+  async findMatches(@Param('inquiryId', ParseUUIDPipe) inquiryId: string) {
+    const matches = await this.inquiriesService.findMatches(inquiryId);
+    return { success: true, data: matches };
+  }
+
   @Patch(':inquiryId/public')
   async setPublicVisibility(
     @Param('inquiryId', ParseUUIDPipe) inquiryId: string,

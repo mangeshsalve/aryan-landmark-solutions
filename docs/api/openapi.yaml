@@ -634,6 +634,40 @@ paths:
               schema:
                 $ref: '#/components/schemas/AssignmentListResponse'
 
+  /inquiries/{inquiryId}/matches:
+    get:
+      tags: [Inquiries]
+      summary: Find matching buyer inquiries for a seller inquiry
+      description: |
+        Phase 11 buyer/property matching foundation. The path inquiry
+        must have type=SELLER and an associated property; matches are
+        BUYER inquiries scored against that property:
+
+          location (50%): candidate.preferredCity equals property.city
+          (case-insensitive)
+          pincode (30%): candidate.preferredPincode equals
+          property.pincode (exact match)
+          budget (20%): property.price <= candidate.maxBudget
+
+        Only candidates scoring 70 or higher are returned, sorted by
+        matchingScore descending. Seller → buyer matching only; the
+        reverse (buyer → seller) direction is not implemented.
+      security:
+        - applicationBearer: []
+      parameters:
+        - $ref: '#/components/parameters/InquiryId'
+      responses:
+        '200':
+          description: Matching buyer inquiries
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InquiryMatchListResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
   /inquiries/{inquiryId}/public:
     patch:
       tags: [Inquiries]
@@ -820,6 +854,17 @@ components:
         - MEDIUM
         - HIGH
         - URGENT
+
+    InquiryType:
+      type: string
+      description: |
+        BUYER = a customer looking to purchase; SELLER = a customer
+        looking to sell the associated property. Introduced in Phase 11
+        to replace the prior free-text `type` field, for buyer/property
+        matching (GET /inquiries/{inquiryId}/matches).
+      enum:
+        - BUYER
+        - SELLER
 
     LoginRequest:
       type: object
@@ -1375,7 +1420,7 @@ components:
           type: string
           format: uuid
         type:
-          type: string
+          $ref: '#/components/schemas/InquiryType'
         priority:
           $ref: '#/components/schemas/InquiryPriority'
         externalReference:
@@ -1390,6 +1435,16 @@ components:
           nullable: true
         remarks:
           type: string
+        preferredCity:
+          type: string
+          description: BUYER matching preference — the city the buyer wants to purchase in.
+        preferredPincode:
+          type: string
+          description: BUYER matching preference — the exact pincode the buyer wants to purchase in.
+        maxBudget:
+          type: number
+          minimum: 0
+          description: BUYER matching preference — maximum price the buyer is willing to pay.
 
     UpdateInquiryRequest:
       type: object
@@ -1401,7 +1456,7 @@ components:
           type: string
           format: uuid
         type:
-          type: string
+          $ref: '#/components/schemas/InquiryType'
         priority:
           $ref: '#/components/schemas/InquiryPriority'
         status:
@@ -1416,6 +1471,16 @@ components:
           format: uuid
         remarks:
           type: string
+        preferredCity:
+          type: string
+          description: BUYER matching preference — the city the buyer wants to purchase in.
+        preferredPincode:
+          type: string
+          description: BUYER matching preference — the exact pincode the buyer wants to purchase in.
+        maxBudget:
+          type: number
+          minimum: 0
+          description: BUYER matching preference — maximum price the buyer is willing to pay.
 
     AssignInquiryRequest:
       type: object
@@ -1451,7 +1516,8 @@ components:
           format: uuid
           nullable: true
         type:
-          type: string
+          allOf:
+            - $ref: '#/components/schemas/InquiryType'
           nullable: true
         priority:
           $ref: '#/components/schemas/InquiryPriority'
@@ -1473,6 +1539,18 @@ components:
           nullable: true
         isPublic:
           type: boolean
+        preferredCity:
+          type: string
+          nullable: true
+          description: BUYER matching preference — the city the buyer wants to purchase in.
+        preferredPincode:
+          type: string
+          nullable: true
+          description: BUYER matching preference — the exact pincode the buyer wants to purchase in.
+        maxBudget:
+          type: number
+          nullable: true
+          description: BUYER matching preference — maximum price the buyer is willing to pay.
         submittedAt:
           type: string
           format: date-time
@@ -1558,6 +1636,52 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/Assignment'
+
+    InquiryMatch:
+      type: object
+      description: |
+        A BUYER inquiry that scored at least 70 against the SELLER
+        inquiry's associated property (Phase 11). Weights: location 50%,
+        pincode 30%, budget 20%.
+      required: [inquiryId, customerId, customerName, matchingScore]
+      properties:
+        inquiryId:
+          type: string
+          format: uuid
+        customerId:
+          type: string
+          format: uuid
+        customerName:
+          type: string
+        customerMobile:
+          type: string
+          nullable: true
+        preferredCity:
+          type: string
+          nullable: true
+        preferredPincode:
+          type: string
+          nullable: true
+        maxBudget:
+          type: number
+          nullable: true
+        matchingScore:
+          type: integer
+          minimum: 70
+          maximum: 100
+          description: locationScore (0 or 50) + pincodeScore (0 or 30) + budgetScore (0 or 20)
+
+    InquiryMatchListResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/InquiryMatch'
+          description: Sorted by matchingScore descending. Only scores >= 70 are included.
 
     PublicPhoto:
       type: object

@@ -152,6 +152,9 @@ Important fields:
 - assigned_to_user_id
 - remarks
 - is_public
+- preferred_city
+- preferred_pincode
+- max_budget
 - submitted_at
 
 `handled_by_user_id` = internal employee responsible for handling the inquiry.
@@ -165,6 +168,43 @@ to another employee.
 non-NULL is the timestamp it was submitted. Set only by the submission
 operation (`POST /inquiries/{id}/submit`) — never accepted from a create or
 update request body. Once set, it is never cleared by normal updates.
+
+`type` (nullable enum, `inquiry_type`: `BUYER` or `SELLER`, Phase 11) —
+replaces the prior free-text field. Determines which side of a deal this
+inquiry represents; see "Buyer/property matching" below.
+
+`preferred_city`, `preferred_pincode`, `max_budget` (all nullable, Phase 11)
+— buyer-stated matching preferences, only meaningful when `type = 'BUYER'`.
+Deliberately independent of the customer's own residential
+address/city/pincode (a customer's home address is not assumed to be where
+they want to buy) and of whatever `property_id` this inquiry happens to
+reference. `max_budget` uses the same `NUMERIC(18,2)` precision as
+`properties.price` for direct comparison — no currency/unit conversion is
+implemented; both are assumed to be the same unit (every property in this
+project currently uses `price_unit = 'INR'`).
+
+## Buyer/property matching (Phase 11)
+
+`GET /inquiries/{inquiryId}/matches` — given a `SELLER` inquiry with an
+associated property, finds `BUYER` inquiries that are a good fit for that
+property. Weighted, deterministic scoring, each criterion all-or-nothing
+(no partial credit):
+
+- **Location — 50%**: `preferred_city` equals the property's `city`
+  (case-insensitive).
+- **Pincode — 30%**: `preferred_pincode` equals the property's `pincode`
+  (exact string match; no geographic-distance approximation, no address
+  parsing).
+- **Budget — 20%**: the property's `price` is less than or equal to the
+  buyer's `max_budget`.
+
+`matchingScore = locationScore + pincodeScore + budgetScore` (0-100). Only
+matches with `matchingScore >= 70` are returned, sorted highest first.
+Because `30 + 20 = 50 < 70`, the location criterion is structurally
+required for any match to qualify — a mathematical consequence of the
+weights, not a separately invented rule. Missing data on either side of a
+comparison scores that criterion 0 (never assumed to match). Only the
+seller → buyer direction is implemented.
 
 ## Inquiry submission lifecycle and call recording rule
 

@@ -16,6 +16,7 @@ import { PropertiesModule } from './properties/properties.module';
 import { AttachmentsModule } from './attachments/attachments.module';
 import { InquiriesModule } from './inquiries/inquiries.module';
 import { MasterModule } from './master/master.module';
+import { UsersModule } from './users/users.module';
 
 @Module({
   imports: [
@@ -38,6 +39,7 @@ import { MasterModule } from './master/master.module';
     AttachmentsModule,
     InquiriesModule,
     MasterModule,
+    UsersModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: AllExceptionsFilter },

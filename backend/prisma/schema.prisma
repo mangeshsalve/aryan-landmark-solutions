@@ -95,7 +95,9 @@ model Inquiry {
   inquiryNumber     String              @unique @map("inquiry_number") @db.VarChar(50)
   customerId        String              @map("customer_id") @db.Uuid
   propertyId        String?             @map("property_id") @db.Uuid
-  type              String?             @db.VarChar(50)
+  /// BUYER or SELLER — see Phase 11 report for the migration from the
+  /// prior free-text `type` values ("Sell"/"SELL") to this enum.
+  type              InquiryType?
   priority          InquiryPriority     @default(MEDIUM)
   status            InquiryStatus       @default(NEW)
   externalReference String?             @map("external_reference") @db.VarChar(255)
@@ -103,6 +105,17 @@ model Inquiry {
   assignedToUserId  String?             @map("assigned_to_user_id") @db.Uuid
   remarks           String?
   isPublic          Boolean             @default(false) @map("is_public")
+  /// Buyer-stated preferences for matching (Phase 11) — only meaningful
+  /// when type=BUYER. Deliberately independent of the customer's
+  /// residential address/pincode and of whatever propertyId this inquiry
+  /// happens to reference; see Phase 11 report Part 4.
+  preferredCity     String?             @map("preferred_city") @db.VarChar(100)
+  preferredPincode  String?             @map("preferred_pincode") @db.VarChar(10)
+  /// Maximum price the buyer is willing to pay, directly comparable to
+  /// Property.price (same Decimal(18,2) precision, same implicit
+  /// currency/unit — see Phase 11 report Part 3 for why no separate
+  /// budget-unit field was added.
+  maxBudget         Decimal?            @map("max_budget") @db.Decimal(18, 2)
   createdAt         DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt         DateTime            @updatedAt @map("updated_at") @db.Timestamptz(6)
   createdByUserId   String              @map("created_by") @db.Uuid
@@ -123,6 +136,7 @@ model Inquiry {
   @@index([handledByUserId], map: "idx_inquiries_handled")
   @@index([isPublic], map: "idx_inquiries_public")
   @@index([createdAt(sort: Desc)], map: "idx_inquiries_created")
+  @@index([type], map: "idx_inquiries_type")
   @@map("inquiries")
 }
 
@@ -271,4 +285,14 @@ enum InquiryPriority {
   URGENT
 
   @@map("inquiry_priority")
+}
+
+/// Phase 11 — replaces the prior free-text Inquiry.type. Only two values:
+/// a third (e.g. "RENT") is out of scope for the current matching
+/// requirement and was not requested.
+enum InquiryType {
+  BUYER
+  SELLER
+
+  @@map("inquiry_type")
 }

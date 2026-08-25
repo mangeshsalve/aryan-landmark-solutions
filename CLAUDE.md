@@ -143,6 +143,17 @@ migration history exists:
 - `20260824000000_add_inquiry_submitted_at` (Phase 6) and
   `20260824010000_add_property_is_public` (Phase 8.1) — additive
   columns, unchanged.
+- `20260825000000_inquiry_buyer_seller_matching` (Phase 11) — converts
+  `inquiries.type` from free-text `VARCHAR(50)` to the new `inquiry_type`
+  enum (`BUYER`/`SELLER`), and adds `preferred_city`, `preferred_pincode`,
+  `max_budget`. **Not a naive Prisma-generated diff**: `prisma migrate
+  diff` proposes a destructive `DROP COLUMN "type"` + `ADD COLUMN` for
+  this exact change, which would silently discard every existing
+  inquiry's `type` value — this migration was hand-written instead to
+  normalize existing free-text values (`'Sell'`/`'SELL'` → `'SELLER'`,
+  `'Buy'`/`'BUYER'` → `'BUYER'`, anything else → `NULL`) and convert the
+  column in place with a `USING` cast. Verified against a real database
+  seeded with exactly this messy data in Phase 11 — no rows lost.
 
 **`docs/database/schema.sql` is a current-schema reference document, not
 migration history.** It is kept up to date (it already includes
@@ -203,6 +214,19 @@ exact commands and real-database test transcripts):
    step trusts a client-echoed R2 key only after prefix-pattern
    matching + an R2 existence check, not a server-held record of what
    was actually issued.
+5. **Buyer/property matching assumptions** (Phase 11) — three deliberate,
+   flagged design decisions rather than confirmed business requirements:
+   (a) location match is city-only (`preferred_city` vs `property.city`)
+   — `preferred_locality` was considered and not added, on the reasoning
+   that the separately-weighted pincode criterion already covers
+   finer-grained precision; (b) budget is a single `max_budget` ceiling
+   compared against `property.price`, not a min/max range — chosen
+   because `properties.price` is itself a single value, not a range;
+   (c) no currency/unit conversion exists — `max_budget` and
+   `property.price` are compared as raw numbers, correct only because
+   every property in this project currently uses `price_unit = 'INR'`.
+   None of these are enforced anywhere beyond application logic; revisit
+   if a real multi-currency or locality-level requirement emerges.
 
 ## Scope discipline (has held for 5 phases — keep it up)
 

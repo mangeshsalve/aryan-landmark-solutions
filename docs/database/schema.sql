@@ -51,6 +51,14 @@ CREATE TYPE inquiry_priority AS ENUM (
   'LOW','MEDIUM','HIGH','URGENT'
 );
 
+-- Phase 11 — replaces the prior free-text inquiries.type. Existing
+-- 'Sell'/'SELL' values were normalized to 'SELLER' by migration
+-- 20260825000000_inquiry_buyer_seller_matching; any other pre-existing
+-- value was set to NULL rather than guessed at.
+CREATE TYPE inquiry_type AS ENUM (
+  'BUYER','SELLER'
+);
+
 CREATE TABLE users (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id VARCHAR(50) UNIQUE,
@@ -149,7 +157,7 @@ CREATE TABLE inquiries (
   customer_id UUID NOT NULL REFERENCES users(id),
   property_id UUID REFERENCES properties(id),
 
-  type VARCHAR(50),
+  type inquiry_type,
   priority inquiry_priority NOT NULL DEFAULT 'MEDIUM',
   status inquiry_status NOT NULL DEFAULT 'NEW',
 
@@ -160,6 +168,16 @@ CREATE TABLE inquiries (
 
   remarks TEXT,
   is_public BOOLEAN NOT NULL DEFAULT FALSE,
+
+  -- Phase 11 — buyer matching preferences. Only meaningful when
+  -- type='BUYER'; independent of the customer's residential
+  -- address/pincode and of whatever property_id this inquiry references.
+  preferred_city VARCHAR(100),
+  preferred_pincode VARCHAR(10),
+  -- Maximum price the buyer will pay; directly comparable to
+  -- properties.price (same precision, same implicit currency/unit — no
+  -- unit-conversion support exists).
+  max_budget NUMERIC(18,2),
 
   -- NULL = not yet submitted; non-NULL = submitted, at the recorded time.
   -- Only ever set by the POST /inquiries/{id}/submit operation.
@@ -178,6 +196,8 @@ CREATE INDEX idx_inquiries_assigned ON inquiries(assigned_to_user_id);
 CREATE INDEX idx_inquiries_handled ON inquiries(handled_by_user_id);
 CREATE INDEX idx_inquiries_public ON inquiries(is_public);
 CREATE INDEX idx_inquiries_created ON inquiries(created_at DESC);
+-- Justified by GET /inquiries/{id}/matches' WHERE type='BUYER' filter.
+CREATE INDEX idx_inquiries_type ON inquiries(type);
 
 CREATE TABLE attachments (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

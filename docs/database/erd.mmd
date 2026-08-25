@@ -55,7 +55,7 @@ erDiagram
         varchar inquiry_number UK
         uuid customer_id FK
         uuid property_id FK
-        varchar type
+        enum type
         enum priority
         enum status
         varchar external_reference
@@ -63,6 +63,9 @@ erDiagram
         uuid assigned_to_user_id FK
         text remarks
         boolean is_public
+        varchar preferred_city
+        varchar preferred_pincode
+        decimal max_budget
         timestamptz submitted_at
     }
 

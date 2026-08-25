@@ -141,3 +141,15 @@ export class InquiryAlreadySubmittedException extends AppException {
     super('CONFLICT', message, HttpStatus.CONFLICT);
   }
 }
+
+/**
+ * GET /inquiries/{id}/matches (Phase 11) requires a SELLER-type inquiry
+ * with an associated property — same VALIDATION_ERROR/400 pattern as
+ * AttachmentRelationshipInvalidException for "the referenced resource
+ * exists but is semantically wrong for this operation."
+ */
+export class InquiryMatchingInvalidException extends AppException {
+  constructor(message: string) {
+    super('VALIDATION_ERROR', message, HttpStatus.BAD_REQUEST);
+  }
+}

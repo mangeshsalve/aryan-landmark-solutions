@@ -20,3 +20,4 @@ export type AttachmentTypeValue = 'PHOTO' | 'DOCUMENT' | 'RECORDING';
 export type DocumentTypeValue = 'SEVEN_TWELVE' | 'SALE_DEED' | 'PROPERTY_CARD' | 'NOC' | 'OTHER';
 export type InquiryStatusValue = 'NEW' | 'IN_PROGRESS' | 'ON_HOLD' | 'COMPLETED' | 'CANCELLED';
 export type InquiryPriorityValue = 'LOW' | 'MEDIUM' | 'HIGH' | 'URGENT';
+export type InquiryTypeValue = 'BUYER' | 'SELLER';

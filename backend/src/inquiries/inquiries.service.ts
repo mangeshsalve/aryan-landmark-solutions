@@ -4,6 +4,7 @@ import {
   CustomerNotFoundException,
   InquiryAlreadySubmittedException,
   InquiryAssignmentInvalidException,
+  InquiryMatchingInvalidException,
   InquiryNotFoundException,
   InquiryRecordingRequiredException,
   PropertyNotFoundException,
@@ -23,6 +24,7 @@ import { ListInquiriesQueryDto } from './dto/list-inquiries-query.dto';
 import { PublicVisibilityDto } from './dto/public-visibility.dto';
 import { UpdateInquiryDto } from './dto/update-inquiry.dto';
 import { generateInquiryNumber } from './inquiry-number.util';
+import { PublicInquiryMatch } from './inquiry-match.mapper';
 import {
   toInquiryCustomerSummary,
   toPublicInquiry,
@@ -149,6 +151,9 @@ export class InquiriesService {
           handledByUserId,
           assignedToUserId,
           remarks: dto.remarks ?? null,
+          preferredCity: dto.preferredCity ?? null,
+          preferredPincode: dto.preferredPincode ?? null,
+          maxBudget: dto.maxBudget ?? null,
           createdByUserId: actor.userId,
           updatedByUserId: actor.userId,
         },
@@ -218,6 +223,9 @@ export class InquiriesService {
       handledByUserId: existing.handledByUserId,
       assignedToUserId: existing.assignedToUserId,
       remarks: existing.remarks,
+      preferredCity: existing.preferredCity,
+      preferredPincode: existing.preferredPincode,
+      maxBudget: existing.maxBudget,
     };
 
     const updated = await this.prisma.$transaction(async (tx: Prisma.TransactionClient) => {
@@ -233,6 +241,9 @@ export class InquiriesService {
           handledByUserId: dto.handledByUserId ?? undefined,
           assignedToUserId: isReassigning ? dto.assignedToUserId : undefined,
           remarks: dto.remarks ?? undefined,
+          preferredCity: dto.preferredCity ?? undefined,
+          preferredPincode: dto.preferredPincode ?? undefined,
+          maxBudget: dto.maxBudget ?? undefined,
           updatedByUserId: actor.userId,
         },
       });
@@ -392,6 +403,109 @@ export class InquiriesService {
     return this.getById(id);
   }
 
+  /**
+   * GET /inquiries/{id}/matches (Phase 11) — Seller → Buyer matching only
+   * (see Phase 11 report Part 8; reverse Buyer → Seller matching was not
+   * requested and is not implemented).
+   *
+   * Weights: location 50, pincode 30, budget 20 (max 100); only scores
+   * >= 70 are returned, sorted highest first. Because 30+20=50 < 70,
+   * reaching the threshold structurally requires the location criterion
+   * to match — every returned match has already matched on city. This
+   * is a mathematical consequence of the given weights, not an extra
+   * invented rule, and is exploited below as a genuine (not speculative)
+   * query optimization: candidates are pre-filtered to the seller
+   * property's city at the database level via the new idx_inquiries_type
+   * index, rather than loading every BUYER inquiry into memory.
+   *
+   * Criteria (each binary — full points or none, no partial credit):
+   *  - location (50): candidate.preferredCity equals property.city
+   *    (case-insensitive)
+   *  - pincode  (30): candidate.preferredPincode equals property.pincode
+   *    (exact string match; no geographic distance, no address parsing)
+   *  - budget   (20): property.price <= candidate.maxBudget (both sides
+   *    assumed to be the same currency/unit — every property in this
+   *    project uses priceUnit=INR; no conversion is implemented). Missing
+   *    data on either side scores 0, never assumed to match.
+   */
+  async findMatches(id: string): Promise<PublicInquiryMatch[]> {
+    const sellerInquiry = await this.prisma.inquiry.findUnique({ where: { id } });
+    if (!sellerInquiry) {
+      throw new InquiryNotFoundException();
+    }
+    if (sellerInquiry.type !== 'SELLER') {
+      throw new InquiryMatchingInvalidException(
+        'Matching is only available for inquiries with type=SELLER.',
+      );
+    }
+    if (!sellerInquiry.propertyId) {
+      throw new InquiryMatchingInvalidException(
+        'This inquiry has no associated property to match against.',
+      );
+    }
+
+    const property = await this.prisma.property.findUnique({
+      where: { id: sellerInquiry.propertyId },
+    });
+    if (!property) {
+      throw new PropertyNotFoundException();
+    }
+
+    // No city on the property means no candidate can ever reach the
+    // mandatory location score — short-circuit rather than loading and
+    // scoring a candidate set that can only ever produce zero results.
+    if (!property.city) {
+      return [];
+    }
+
+    const candidates = await this.prisma.inquiry.findMany({
+      where: {
+        type: 'BUYER',
+        preferredCity: { equals: property.city, mode: 'insensitive' },
+      },
+      include: { customer: true },
+    });
+
+    const propertyPrice = property.price === null ? null : Number(property.price);
+
+    const matches: PublicInquiryMatch[] = [];
+    for (const candidate of candidates) {
+      const locationScore = 50; // guaranteed by the preferredCity filter above
+
+      const pincodeScore =
+        candidate.preferredPincode !== null &&
+        property.pincode !== null &&
+        candidate.preferredPincode === property.pincode
+          ? 30
+          : 0;
+
+      const candidateMaxBudget = candidate.maxBudget === null ? null : Number(candidate.maxBudget);
+      const budgetScore =
+        candidateMaxBudget !== null && propertyPrice !== null && propertyPrice <= candidateMaxBudget
+          ? 20
+          : 0;
+
+      const matchingScore = locationScore + pincodeScore + budgetScore;
+      if (matchingScore < 70) {
+        continue;
+      }
+
+      matches.push({
+        inquiryId: candidate.id,
+        customerId: candidate.customerId,
+        customerName: candidate.customer.name,
+        customerMobile: candidate.customer.mobile,
+        preferredCity: candidate.preferredCity,
+        preferredPincode: candidate.preferredPincode,
+        maxBudget: candidateMaxBudget,
+        matchingScore,
+      });
+    }
+
+    matches.sort((a, b) => b.matchingScore - a.matchingScore);
+    return matches;
+  }
+
   async listAssignments(id: string): Promise<PublicAssignment[]> {
     const exists = await this.prisma.inquiry.findUnique({ where: { id }, select: { id: true } });
     if (!exists) {
@@ -448,6 +562,9 @@ export class InquiriesService {
     assignedToUserId: string | null;
     remarks: string | null;
     isPublic: boolean;
+    preferredCity: string | null;
+    preferredPincode: string | null;
+    maxBudget: unknown;
     submittedAt: Date | null;
     createdAt: Date;
     updatedAt: Date;
