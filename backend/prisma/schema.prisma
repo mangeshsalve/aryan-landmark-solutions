@@ -1,12 +1,3 @@
-// Aryan Landmark Solutions — Prisma schema
-// Executable source of truth, kept synchronized with:
-//   docs/database/database-design.md
-//   docs/database/schema.sql
-//   docs/database/erd.mmd
-//
-// Exactly 6 tables, per the documented final design. Do not add tables
-// without an explicit architecture requirement.
-
 generator client {
   provider = "prisma-client-js"
 }
@@ -14,6 +5,194 @@ generator client {
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
+}
+
+/// 1. users — APPLICATION_USER (ADMIN/EMPLOYEE), CUSTOMER, or MASTER.
+/// Identity shape is enforced by chk_users_identity in schema.sql; Phase 1
+/// creates the table only — no auth logic reads/writes it yet.
+model User {
+  id                  String              @id @default(uuid()) @db.Uuid
+  userId              String?             @unique @map("user_id") @db.VarChar(50)
+  userType            UserType            @map("user_type")
+  role                ApplicationRole?
+  name                String              @db.VarChar(150)
+  email               String?             @db.VarChar(255)
+  mobile              String?             @db.VarChar(20)
+  alternateMobile     String?             @map("alternate_mobile") @db.VarChar(20)
+  address             String?
+  city                String?             @db.VarChar(100)
+  state               String?             @db.VarChar(100)
+  pincode             String?             @db.VarChar(10)
+  passwordHash        String?             @map("password_hash")
+  status              UserStatus          @default(ACTIVE)
+  lastLoginAt         DateTime?           @map("last_login_at") @db.Timestamptz(6)
+  createdAt           DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt           DateTime            @updatedAt @map("updated_at") @db.Timestamptz(6)
+  createdByUserId     String?             @map("created_by") @db.Uuid
+  updatedByUserId     String?             @map("updated_by") @db.Uuid
+  uploadedAttachments Attachment[]        @relation("AttachmentUploadedBy")
+  auditLogs           AuditLog[]
+  assignedInquiries   Inquiry[]           @relation("InquiryAssignedTo")
+  createdInquiries    Inquiry[]           @relation("InquiryCreatedBy")
+  customerInquiries   Inquiry[]           @relation("InquiryCustomer")
+  handledInquiries    Inquiry[]           @relation("InquiryHandledBy")
+  updatedInquiries    Inquiry[]           @relation("InquiryUpdatedBy")
+  assignmentsFrom     InquiryAssignment[] @relation("AssignmentFrom")
+  assignmentsTo       InquiryAssignment[] @relation("AssignmentTo")
+  createdAssignments  InquiryAssignment[] @relation("AssignmentCreatedBy")
+  createdProperties   Property[]          @relation("PropertyCreatedBy")
+  updatedProperties   Property[]          @relation("PropertyUpdatedBy")
+  createdBy           User?               @relation("UserCreatedBy", fields: [createdByUserId], references: [id])
+  createdUsers        User[]              @relation("UserCreatedBy")
+  updatedBy           User?               @relation("UserUpdatedBy", fields: [updatedByUserId], references: [id])
+  updatedUsers        User[]              @relation("UserUpdatedBy")
+
+  @@index([mobile], map: "idx_users_mobile")
+  @@index([userType, status], map: "idx_users_type_status")
+  @@map("users")
+}
+
+/// 2. properties
+model Property {
+  id              String           @id @default(uuid()) @db.Uuid
+  propertyCode    String           @unique @map("property_code") @db.VarChar(50)
+  propertyType    String           @map("property_type") @db.VarChar(50)
+  category        PropertyCategory
+  area            Decimal?         @db.Decimal(14, 2)
+  areaUnit        String?          @map("area_unit") @db.VarChar(20)
+  price           Decimal?         @db.Decimal(18, 2)
+  priceUnit       String?          @map("price_unit") @db.VarChar(20)
+  gatNoDetails    String?          @map("gat_no_details") @db.VarChar(255)
+  description     String?
+  address         String?
+  locality        String?          @db.VarChar(150)
+  city            String?          @db.VarChar(100)
+  state           String?          @db.VarChar(100)
+  pincode         String?          @db.VarChar(10)
+  latitude        Decimal?         @db.Decimal(10, 7)
+  longitude       Decimal?         @db.Decimal(10, 7)
+  mapUrl          String?          @map("map_url")
+  status          PropertyStatus   @default(AVAILABLE)
+  createdAt       DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime         @updatedAt @map("updated_at") @db.Timestamptz(6)
+  createdByUserId String?          @map("created_by") @db.Uuid
+  updatedByUserId String?          @map("updated_by") @db.Uuid
+  isPublic        Boolean?         @map("is_public")
+  attachments     Attachment[]
+  inquiries       Inquiry[]
+  createdBy       User?            @relation("PropertyCreatedBy", fields: [createdByUserId], references: [id])
+  updatedBy       User?            @relation("PropertyUpdatedBy", fields: [updatedByUserId], references: [id])
+
+  @@index([status], map: "idx_properties_status")
+  @@index([city], map: "idx_properties_city")
+  @@index([category], map: "idx_properties_category")
+  @@map("properties")
+}
+
+/// 3. inquiries
+model Inquiry {
+  id                String              @id @default(uuid()) @db.Uuid
+  inquiryNumber     String              @unique @map("inquiry_number") @db.VarChar(50)
+  customerId        String              @map("customer_id") @db.Uuid
+  propertyId        String?             @map("property_id") @db.Uuid
+  type              String?             @db.VarChar(50)
+  priority          InquiryPriority     @default(MEDIUM)
+  status            InquiryStatus       @default(NEW)
+  externalReference String?             @map("external_reference") @db.VarChar(255)
+  handledByUserId   String?             @map("handled_by_user_id") @db.Uuid
+  assignedToUserId  String?             @map("assigned_to_user_id") @db.Uuid
+  remarks           String?
+  isPublic          Boolean             @default(false) @map("is_public")
+  createdAt         DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime            @updatedAt @map("updated_at") @db.Timestamptz(6)
+  createdByUserId   String              @map("created_by") @db.Uuid
+  updatedByUserId   String?             @map("updated_by") @db.Uuid
+  attachments       Attachment[]
+  assignedTo        User?               @relation("InquiryAssignedTo", fields: [assignedToUserId], references: [id])
+  createdBy         User                @relation("InquiryCreatedBy", fields: [createdByUserId], references: [id])
+  customer          User                @relation("InquiryCustomer", fields: [customerId], references: [id])
+  handledBy         User?               @relation("InquiryHandledBy", fields: [handledByUserId], references: [id])
+  property          Property?           @relation(fields: [propertyId], references: [id])
+  updatedBy         User?               @relation("InquiryUpdatedBy", fields: [updatedByUserId], references: [id])
+  assignments       InquiryAssignment[]
+  submittedAt       DateTime?           @map("submitted_at")
+  @@index([customerId], map: "idx_inquiries_customer")
+  @@index([propertyId], map: "idx_inquiries_property")
+  @@index([status], map: "idx_inquiries_status")
+  @@index([assignedToUserId], map: "idx_inquiries_assigned")
+  @@index([handledByUserId], map: "idx_inquiries_handled")
+  @@index([isPublic], map: "idx_inquiries_public")
+  @@index([createdAt(sort: Desc)], map: "idx_inquiries_created")
+  @@map("inquiries")
+}
+
+/// 4. attachments — unified PHOTO / DOCUMENT / RECORDING metadata table.
+/// Relationship and document-type rules are enforced by
+/// chk_attachment_relationship / chk_attachment_document_type in schema.sql.
+model Attachment {
+  id               String         @id @default(uuid()) @db.Uuid
+  propertyId       String?        @map("property_id") @db.Uuid
+  inquiryId        String?        @map("inquiry_id") @db.Uuid
+  attachmentType   AttachmentType @map("attachment_type")
+  documentType     DocumentType?  @map("document_type")
+  fileName         String         @map("file_name") @db.VarChar(255)
+  mimeType         String         @map("mime_type") @db.VarChar(150)
+  fileSizeBytes    BigInt?        @map("file_size_bytes")
+  r2Bucket         String         @map("r2_bucket") @db.VarChar(255)
+  r2ObjectKey      String         @unique @map("r2_object_key") @db.VarChar(1024)
+  fileUrl          String?        @map("file_url")
+  isPrimary        Boolean        @default(false) @map("is_primary")
+  displayOrder     Int            @default(0) @map("display_order")
+  uploadedByUserId String         @map("uploaded_by") @db.Uuid
+  createdAt        DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  inquiry          Inquiry?       @relation(fields: [inquiryId], references: [id], onDelete: Cascade)
+  property         Property?      @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  uploadedBy       User           @relation("AttachmentUploadedBy", fields: [uploadedByUserId], references: [id])
+
+  @@index([propertyId], map: "idx_attachments_property")
+  @@index([inquiryId], map: "idx_attachments_inquiry")
+  @@index([attachmentType], map: "idx_attachments_type")
+  @@index([inquiryId, attachmentType], map: "idx_attachments_inquiry_type")
+  @@map("attachments")
+}
+
+/// 5. inquiry_assignments — assignment/reassignment history.
+/// Current assignment lives on inquiries.assigned_to_user_id; this table
+/// is the append-only history.
+model InquiryAssignment {
+  id                 String   @id @default(uuid()) @db.Uuid
+  inquiryId          String   @map("inquiry_id") @db.Uuid
+  assignedFromUserId String?  @map("assigned_from_user_id") @db.Uuid
+  assignedToUserId   String   @map("assigned_to_user_id") @db.Uuid
+  assignedAt         DateTime @default(now()) @map("assigned_at") @db.Timestamptz(6)
+  reason             String?
+  createdByUserId    String   @map("created_by") @db.Uuid
+  assignedFrom       User?    @relation("AssignmentFrom", fields: [assignedFromUserId], references: [id])
+  assignedTo         User     @relation("AssignmentTo", fields: [assignedToUserId], references: [id])
+  createdBy          User     @relation("AssignmentCreatedBy", fields: [createdByUserId], references: [id])
+  inquiry            Inquiry  @relation(fields: [inquiryId], references: [id], onDelete: Cascade)
+
+  @@index([inquiryId, assignedAt(sort: Desc)], map: "idx_inquiry_assignments_inquiry")
+  @@map("inquiry_assignments")
+}
+
+/// 6. audit_logs
+model AuditLog {
+  id         String   @id @default(uuid()) @db.Uuid
+  userId     String?  @map("user_id") @db.Uuid
+  entityType String   @map("entity_type") @db.VarChar(100)
+  entityId   String?  @map("entity_id") @db.Uuid
+  action     String   @db.VarChar(100)
+  oldValues  Json?    @map("old_values")
+  newValues  Json?    @map("new_values")
+  ipAddress  String?  @map("ip_address")
+  userAgent  String?  @map("user_agent")
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  user       User?    @relation(fields: [userId], references: [id])
+
+  @@index([entityType, entityId, createdAt(sort: Desc)], map: "idx_audit_entity")
+  @@index([userId, createdAt(sort: Desc)], map: "idx_audit_user")
+  @@map("audit_logs")
 }
 
 enum UserType {
@@ -92,240 +271,4 @@ enum InquiryPriority {
   URGENT
 
   @@map("inquiry_priority")
-}
-
-/// 1. users — APPLICATION_USER (ADMIN/EMPLOYEE), CUSTOMER, or MASTER.
-/// Identity shape is enforced by chk_users_identity in schema.sql; Phase 1
-/// creates the table only — no auth logic reads/writes it yet.
-model User {
-  id               String     @id @default(uuid()) @db.Uuid
-  userId           String?    @unique @map("user_id") @db.VarChar(50)
-  userType         UserType   @map("user_type")
-  role             ApplicationRole?
-  name             String     @db.VarChar(150)
-  email            String?    @db.VarChar(255)
-  mobile           String?    @db.VarChar(20)
-  alternateMobile  String?    @map("alternate_mobile") @db.VarChar(20)
-  address          String?
-  city             String?    @db.VarChar(100)
-  state            String?    @db.VarChar(100)
-  pincode          String?    @db.VarChar(10)
-  passwordHash     String?    @map("password_hash")
-  status           UserStatus @default(ACTIVE)
-  lastLoginAt      DateTime?  @map("last_login_at") @db.Timestamptz(6)
-  createdAt        DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt        DateTime   @updatedAt @map("updated_at") @db.Timestamptz(6)
-
-  createdByUserId  String?    @map("created_by") @db.Uuid
-  createdBy        User?      @relation("UserCreatedBy", fields: [createdByUserId], references: [id])
-  updatedByUserId  String?    @map("updated_by") @db.Uuid
-  updatedBy        User?      @relation("UserUpdatedBy", fields: [updatedByUserId], references: [id])
-
-  createdUsers         User[]              @relation("UserCreatedBy")
-  updatedUsers         User[]              @relation("UserUpdatedBy")
-  createdProperties    Property[]          @relation("PropertyCreatedBy")
-  updatedProperties    Property[]          @relation("PropertyUpdatedBy")
-  customerInquiries    Inquiry[]           @relation("InquiryCustomer")
-  handledInquiries     Inquiry[]           @relation("InquiryHandledBy")
-  assignedInquiries    Inquiry[]           @relation("InquiryAssignedTo")
-  createdInquiries     Inquiry[]           @relation("InquiryCreatedBy")
-  updatedInquiries     Inquiry[]           @relation("InquiryUpdatedBy")
-  uploadedAttachments  Attachment[]        @relation("AttachmentUploadedBy")
-  assignmentsFrom      InquiryAssignment[] @relation("AssignmentFrom")
-  assignmentsTo        InquiryAssignment[] @relation("AssignmentTo")
-  createdAssignments   InquiryAssignment[] @relation("AssignmentCreatedBy")
-  auditLogs            AuditLog[]
-
-  @@index([mobile], map: "idx_users_mobile")
-  @@index([userType, status], map: "idx_users_type_status")
-  @@map("users")
-}
-
-/// 2. properties
-model Property {
-  id             String           @id @default(uuid()) @db.Uuid
-  propertyCode   String           @unique @map("property_code") @db.VarChar(50)
-  propertyType   String           @map("property_type") @db.VarChar(50)
-  category       PropertyCategory
-  area           Decimal?         @db.Decimal(14, 2)
-  areaUnit       String?          @map("area_unit") @db.VarChar(20)
-  price          Decimal?         @db.Decimal(18, 2)
-  priceUnit      String?          @map("price_unit") @db.VarChar(20)
-  gatNoDetails   String?          @map("gat_no_details") @db.VarChar(255)
-  description    String?
-
-  address     String?
-  locality    String?  @db.VarChar(150)
-  city        String?  @db.VarChar(100)
-  state       String?  @db.VarChar(100)
-  pincode     String?  @db.VarChar(10)
-  latitude    Decimal? @db.Decimal(10, 7)
-  longitude   Decimal? @db.Decimal(10, 7)
-  mapUrl      String?  @map("map_url")
-
-  status    PropertyStatus @default(AVAILABLE)
-
-  // Public-website visibility — distinct from Inquiry.isPublic (see
-  // schema.sql / database-design.md). GET /public/properties requires
-  // isPublic=true AND status=AVAILABLE; only an ADMIN may set this
-  // (PropertiesService.update).
-  isPublic Boolean @default(false) @map("is_public")
-
-  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
-
-  createdByUserId String? @map("created_by") @db.Uuid
-  createdBy       User?   @relation("PropertyCreatedBy", fields: [createdByUserId], references: [id])
-  updatedByUserId String? @map("updated_by") @db.Uuid
-  updatedBy       User?   @relation("PropertyUpdatedBy", fields: [updatedByUserId], references: [id])
-
-  inquiries   Inquiry[]
-  attachments Attachment[]
-
-  @@index([status], map: "idx_properties_status")
-  @@index([city], map: "idx_properties_city")
-  @@index([category], map: "idx_properties_category")
-  @@index([isPublic], map: "idx_properties_public")
-  @@map("properties")
-}
-
-/// 3. inquiries
-model Inquiry {
-  id             String          @id @default(uuid()) @db.Uuid
-  inquiryNumber  String          @unique @map("inquiry_number") @db.VarChar(50)
-
-  customerId String @map("customer_id") @db.Uuid
-  customer   User   @relation("InquiryCustomer", fields: [customerId], references: [id])
-
-  propertyId String?   @map("property_id") @db.Uuid
-  property   Property? @relation(fields: [propertyId], references: [id])
-
-  type     String?         @db.VarChar(50)
-  priority InquiryPriority @default(MEDIUM)
-  status   InquiryStatus   @default(NEW)
-
-  externalReference String? @map("external_reference") @db.VarChar(255)
-
-  handledByUserId String? @map("handled_by_user_id") @db.Uuid
-  handledBy       User?   @relation("InquiryHandledBy", fields: [handledByUserId], references: [id])
-
-  assignedToUserId String? @map("assigned_to_user_id") @db.Uuid
-  assignedTo       User?   @relation("InquiryAssignedTo", fields: [assignedToUserId], references: [id])
-
-  remarks  String?
-  isPublic Boolean @default(false) @map("is_public")
-
-  // NULL = not yet submitted; non-NULL = submitted, at the recorded time.
-  // Only ever set by InquiriesService.submit() — never accepted from a
-  // create/update request body (see CreateInquiryDto/UpdateInquiryDto,
-  // which deliberately omit it; the global ValidationPipe's
-  // forbidNonWhitelisted rejects any attempt to send it).
-  submittedAt DateTime? @map("submitted_at") @db.Timestamptz(6)
-
-  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
-
-  createdByUserId String @map("created_by") @db.Uuid
-  createdBy       User   @relation("InquiryCreatedBy", fields: [createdByUserId], references: [id])
-  updatedByUserId String? @map("updated_by") @db.Uuid
-  updatedBy       User?   @relation("InquiryUpdatedBy", fields: [updatedByUserId], references: [id])
-
-  attachments Attachment[]
-  assignments InquiryAssignment[]
-
-  @@index([customerId], map: "idx_inquiries_customer")
-  @@index([propertyId], map: "idx_inquiries_property")
-  @@index([status], map: "idx_inquiries_status")
-  @@index([assignedToUserId], map: "idx_inquiries_assigned")
-  @@index([handledByUserId], map: "idx_inquiries_handled")
-  @@index([isPublic], map: "idx_inquiries_public")
-  @@index([createdAt(sort: Desc)], map: "idx_inquiries_created")
-  @@map("inquiries")
-}
-
-/// 4. attachments — unified PHOTO / DOCUMENT / RECORDING metadata table.
-/// Relationship and document-type rules are enforced by
-/// chk_attachment_relationship / chk_attachment_document_type in schema.sql.
-model Attachment {
-  id String @id @default(uuid()) @db.Uuid
-
-  propertyId String?   @map("property_id") @db.Uuid
-  property   Property? @relation(fields: [propertyId], references: [id], onDelete: Cascade)
-
-  inquiryId String?  @map("inquiry_id") @db.Uuid
-  inquiry   Inquiry? @relation(fields: [inquiryId], references: [id], onDelete: Cascade)
-
-  attachmentType AttachmentType @map("attachment_type")
-  documentType   DocumentType?  @map("document_type")
-
-  fileName      String  @map("file_name") @db.VarChar(255)
-  mimeType      String  @map("mime_type") @db.VarChar(150)
-  fileSizeBytes BigInt? @map("file_size_bytes")
-
-  r2Bucket    String  @map("r2_bucket") @db.VarChar(255)
-  r2ObjectKey String  @unique @map("r2_object_key") @db.VarChar(1024)
-  fileUrl     String? @map("file_url")
-
-  isPrimary    Boolean @default(false) @map("is_primary")
-  displayOrder Int     @default(0) @map("display_order")
-
-  uploadedByUserId String @map("uploaded_by") @db.Uuid
-  uploadedBy       User   @relation("AttachmentUploadedBy", fields: [uploadedByUserId], references: [id])
-
-  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-
-  @@index([propertyId], map: "idx_attachments_property")
-  @@index([inquiryId], map: "idx_attachments_inquiry")
-  @@index([attachmentType], map: "idx_attachments_type")
-  @@index([inquiryId, attachmentType], map: "idx_attachments_inquiry_type")
-  @@map("attachments")
-}
-
-/// 5. inquiry_assignments — assignment/reassignment history.
-/// Current assignment lives on inquiries.assigned_to_user_id; this table
-/// is the append-only history.
-model InquiryAssignment {
-  id String @id @default(uuid()) @db.Uuid
-
-  inquiryId String  @map("inquiry_id") @db.Uuid
-  inquiry   Inquiry @relation(fields: [inquiryId], references: [id], onDelete: Cascade)
-
-  assignedFromUserId String? @map("assigned_from_user_id") @db.Uuid
-  assignedFrom       User?   @relation("AssignmentFrom", fields: [assignedFromUserId], references: [id])
-
-  assignedToUserId String @map("assigned_to_user_id") @db.Uuid
-  assignedTo       User   @relation("AssignmentTo", fields: [assignedToUserId], references: [id])
-
-  assignedAt DateTime @default(now()) @map("assigned_at") @db.Timestamptz(6)
-  reason     String?
-
-  createdByUserId String @map("created_by") @db.Uuid
-  createdBy       User   @relation("AssignmentCreatedBy", fields: [createdByUserId], references: [id])
-
-  @@index([inquiryId, assignedAt(sort: Desc)], map: "idx_inquiry_assignments_inquiry")
-  @@map("inquiry_assignments")
-}
-
-/// 6. audit_logs
-model AuditLog {
-  id String @id @default(uuid()) @db.Uuid
-
-  userId String? @map("user_id") @db.Uuid
-  user   User?   @relation(fields: [userId], references: [id])
-
-  entityType String  @map("entity_type") @db.VarChar(100)
-  entityId   String? @map("entity_id") @db.Uuid
-  action     String  @db.VarChar(100)
-
-  oldValues Json? @map("old_values")
-  newValues Json? @map("new_values")
-
-  ipAddress String? @map("ip_address")
-  userAgent String? @map("user_agent")
-
-  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-
-  @@index([entityType, entityId, createdAt(sort: Desc)], map: "idx_audit_entity")
-  @@index([userId, createdAt(sort: Desc)], map: "idx_audit_user")
-  @@map("audit_logs")
 }

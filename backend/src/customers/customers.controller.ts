@@ -12,7 +12,7 @@ import {
   Req,
   UseGuards,
 } from '@nestjs/common';
-import { ApiTags } from '@nestjs/swagger';
+import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { JwtApplicationAuthGuard } from '../auth/guards/jwt-application-auth.guard';
@@ -34,6 +34,7 @@ import type { Request } from 'express';
  */
 @ApiTags('Customers')
 @Controller('customers')
+@ApiBearerAuth('application-jwt')
 @UseGuards(JwtApplicationAuthGuard, RolesGuard)
 @Roles('ADMIN', 'EMPLOYEE')
 export class CustomersController {
@@ -85,3 +86,5 @@ export class CustomersController {
 function normalizeUserAgent(value: string | string[] | undefined): string | undefined {
   return Array.isArray(value) ? value[0] : value;
 }
+
+

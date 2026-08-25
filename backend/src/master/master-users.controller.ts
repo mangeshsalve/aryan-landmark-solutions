@@ -1,5 +1,5 @@
 import { Body, Controller, HttpCode, HttpStatus, Post, Req, UseGuards } from '@nestjs/common';
-import { ApiTags } from '@nestjs/swagger';
+import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import type { Request } from 'express';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { JwtMasterAuthGuard } from '../auth/guards/jwt-master-auth.guard';
@@ -16,8 +16,9 @@ import { MasterUsersService } from './master-users.service';
  * there is only one master privilege level, so guard-passing is itself
  * sufficient authorization here, same as MasterAuthController.
  */
+@ApiBearerAuth('master-jwt')
 @ApiTags('Master Management')
-@Controller('master/users')
+@Controller('master/users') 
 @UseGuards(JwtMasterAuthGuard)
 export class MasterUsersController {
   constructor(private readonly masterUsersService: MasterUsersService) {}
