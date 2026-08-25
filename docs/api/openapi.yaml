@@ -334,9 +334,17 @@ paths:
       description: |
         Unified file upload endpoint.
 
-        Use `attachmentType=PHOTO` for property photos,
-        `attachmentType=DOCUMENT` for 7/12 and other property documents,
-        `attachmentType=RECORDING` for inquiry call recordings.
+        Use `attachmentType=PHOTO` for property or inquiry photos,
+        `attachmentType=DOCUMENT` for 7/12 and other property/inquiry
+        documents, `attachmentType=RECORDING` for inquiry call recordings.
+
+        Relationship rules:
+        - RECORDING: inquiryId required, propertyId must be absent.
+        - PHOTO / DOCUMENT: exactly one of propertyId or inquiryId is
+          required (never both). propertyId is the original property-photo
+          flow; inquiryId supports the lightweight ADMIN-call-capture flow
+          (Phase 13B) where photos/documents are gathered before a
+          property record exists.
 
         The backend validates resource ownership/authorization and returns
         a short-lived upload URL and generated R2 object key.
@@ -368,7 +376,8 @@ paths:
         The client calls this endpoint after uploading the binary to R2.
 
         The backend verifies the expected object and creates one row in the
-        `attachments` table.
+        `attachments` table. Same propertyId/inquiryId relationship rules
+        as POST /attachments/upload-url.
       security:
         - applicationBearer: []
       requestBody:
@@ -485,9 +494,19 @@ paths:
       description: |
         Creator is derived from the authenticated JWT.
 
+        customerId/propertyId are optional (Phase 13B): an ADMIN taking a
+        call can create a lightweight inquiry (customerId=null,
+        propertyId=null, type=null, status=NEW) before either master
+        record has been identified — see the inquiry-centric attachment
+        capture flow below.
+
         ADMIN:
         At least one RECORDING attachment associated with this inquiry is
-        required before creation is considered complete.
+        required before submission (POST /inquiries/{inquiryId}/submit) is
+        allowed. Since a RECORDING requires inquiryId, the inquiry must
+        already exist — record it via POST /attachments/upload-url +
+        POST /attachments against the created inquiryId, then assign an
+        EMPLOYEE.
 
         EMPLOYEE:
         Recording is optional.
@@ -1072,6 +1091,22 @@ components:
           type: string
           enum: [ACTIVE, INACTIVE, BLOCKED]
 
+    UserSummary:
+      type: object
+      required: [id, name]
+      description: |
+        Minimal, embeddable display identity for a user (Phase 14A) — id
+        and name only. Deliberately does not carry email/mobile/role/
+        status/userId; unlike User above, it's for label-only embedding
+        (e.g. Inquiry.handledBy/assignedTo), never for anything requiring
+        the full user record.
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+
     UserResponse:
       type: object
       required: [success, data]
@@ -1266,10 +1301,17 @@ components:
           type: string
           format: uuid
           nullable: true
+          description: |
+            Required for PHOTO/DOCUMENT unless inquiryId is set instead
+            (mutually exclusive). Must be absent for RECORDING.
         inquiryId:
           type: string
           format: uuid
           nullable: true
+          description: |
+            Required for RECORDING. For PHOTO/DOCUMENT, may be used
+            instead of propertyId during lightweight inquiry capture
+            (Phase 13B) — mutually exclusive with propertyId.
         documentType:
           $ref: '#/components/schemas/DocumentType'
         fileName:
@@ -1298,10 +1340,17 @@ components:
           type: string
           format: uuid
           nullable: true
+          description: |
+            Required for PHOTO/DOCUMENT unless inquiryId is set instead
+            (mutually exclusive). Must be absent for RECORDING.
         inquiryId:
           type: string
           format: uuid
           nullable: true
+          description: |
+            Required for RECORDING. For PHOTO/DOCUMENT, may be used
+            instead of propertyId during lightweight inquiry capture
+            (Phase 13B) — mutually exclusive with propertyId.
         documentType:
           $ref: '#/components/schemas/DocumentType'
         fileName:
@@ -1411,14 +1460,23 @@ components:
 
     CreateInquiryRequest:
       type: object
-      required: [customerId, propertyId]
+      description: |
+        customerId and propertyId are both optional (Phase 13B) — an
+        ADMIN taking a call can create a lightweight inquiry
+        (customerId=null, propertyId=null, type=null, status=NEW) before
+        either master record has been identified, then attach a
+        recording/photos/documents against the returned inquiryId and
+        assign an EMPLOYEE. The EMPLOYEE later identifies/creates the
+        customer and property via PATCH /inquiries/{inquiryId}.
       properties:
         customerId:
           type: string
           format: uuid
+          nullable: true
         propertyId:
           type: string
           format: uuid
+          nullable: true
         type:
           $ref: '#/components/schemas/InquiryType'
         priority:
@@ -1511,6 +1569,10 @@ components:
         customerId:
           type: string
           format: uuid
+          nullable: true
+          description: |
+            NULL for a lightweight inquiry (Phase 13B) until an EMPLOYEE
+            sets it via PATCH /inquiries/{inquiryId}.
         propertyId:
           type: string
           format: uuid
@@ -1530,10 +1592,26 @@ components:
           type: string
           format: uuid
           nullable: true
+        handledBy:
+          allOf:
+            - $ref: '#/components/schemas/UserSummary'
+          nullable: true
+          description: |
+            Minimal display identity for handledByUserId (Phase 14A) — null
+            when unassigned. handledByUserId remains the field to use for
+            API operations/authorization; this is read-model only.
         assignedToUserId:
           type: string
           format: uuid
           nullable: true
+        assignedTo:
+          allOf:
+            - $ref: '#/components/schemas/UserSummary'
+          nullable: true
+          description: |
+            Minimal display identity for assignedToUserId (Phase 14A) —
+            null when unassigned. assignedToUserId remains the field to use
+            for API operations/authorization; this is read-model only.
         remarks:
           type: string
           nullable: true

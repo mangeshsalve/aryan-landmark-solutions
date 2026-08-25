@@ -93,7 +93,10 @@ model Property {
 model Inquiry {
   id                String              @id @default(uuid()) @db.Uuid
   inquiryNumber     String              @unique @map("inquiry_number") @db.VarChar(50)
-  customerId        String              @map("customer_id") @db.Uuid
+  /// Nullable as of Phase 13B — an ADMIN can create a lightweight,
+  /// call-driven inquiry (customerId/propertyId both NULL) before the
+  /// customer or property has been identified. See Phase 13B report.
+  customerId        String?             @map("customer_id") @db.Uuid
   propertyId        String?             @map("property_id") @db.Uuid
   /// BUYER or SELLER — see Phase 11 report for the migration from the
   /// prior free-text `type` values ("Sell"/"SELL") to this enum.
@@ -123,7 +126,7 @@ model Inquiry {
   attachments       Attachment[]
   assignedTo        User?               @relation("InquiryAssignedTo", fields: [assignedToUserId], references: [id])
   createdBy         User                @relation("InquiryCreatedBy", fields: [createdByUserId], references: [id])
-  customer          User                @relation("InquiryCustomer", fields: [customerId], references: [id])
+  customer          User?               @relation("InquiryCustomer", fields: [customerId], references: [id])
   handledBy         User?               @relation("InquiryHandledBy", fields: [handledByUserId], references: [id])
   property          Property?           @relation(fields: [propertyId], references: [id])
   updatedBy         User?               @relation("InquiryUpdatedBy", fields: [updatedByUserId], references: [id])
@@ -143,6 +146,8 @@ model Inquiry {
 /// 4. attachments — unified PHOTO / DOCUMENT / RECORDING metadata table.
 /// Relationship and document-type rules are enforced by
 /// chk_attachment_relationship / chk_attachment_document_type in schema.sql.
+/// As of Phase 13B: PHOTO/DOCUMENT require property_id OR inquiry_id (not
+/// both); RECORDING still requires inquiry_id only. See Phase 13B report.
 model Attachment {
   id               String         @id @default(uuid()) @db.Uuid
   propertyId       String?        @map("property_id") @db.Uuid

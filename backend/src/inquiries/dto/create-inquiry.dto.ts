@@ -1,4 +1,4 @@
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { ApiPropertyOptional } from '@nestjs/swagger';
 import { IsIn, IsNumber, IsOptional, IsString, IsUUID, Min, MaxLength } from 'class-validator';
 
 const INQUIRY_PRIORITIES = ['LOW', 'MEDIUM', 'HIGH', 'URGENT'] as const;
@@ -11,15 +11,24 @@ const INQUIRY_TYPES = ['BUYER', 'SELLER'] as const;
  * those are derived from the authenticated JWT in InquiriesService, never
  * accepted from the client (the global ValidationPipe's
  * forbidNonWhitelisted rejects an attempt to send them).
+ *
+ * Phase 13B: customerId/propertyId are both optional — an ADMIN taking a
+ * call can create a lightweight inquiry (customerId=NULL, propertyId=
+ * NULL, type=NULL, status=NEW) before either master record exists, then
+ * attach a recording/photos/documents against the inquiryId and assign an
+ * EMPLOYEE, who identifies/creates the customer and property later via
+ * PATCH /inquiries/{id}.
  */
 export class CreateInquiryDto {
-  @ApiProperty({ format: 'uuid' })
+  @ApiPropertyOptional({ format: 'uuid' })
+  @IsOptional()
   @IsUUID()
-  customerId!: string;
+  customerId?: string;
 
-  @ApiProperty({ format: 'uuid' })
+  @ApiPropertyOptional({ format: 'uuid' })
+  @IsOptional()
   @IsUUID()
-  propertyId!: string;
+  propertyId?: string;
 
   @ApiPropertyOptional({ enum: INQUIRY_TYPES })
   @IsOptional()

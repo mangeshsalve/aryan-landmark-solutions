@@ -24,7 +24,14 @@ export type ObjectKeyAttachmentType = 'PHOTO' | 'DOCUMENT' | 'RECORDING';
  * this. Structure per this phase's spec:
  *   properties/{propertyId}/photos/{uuid}-{safeFileName}
  *   properties/{propertyId}/documents/{uuid}-{safeFileName}
+ *   inquiries/{inquiryId}/photos/{uuid}-{safeFileName}
+ *   inquiries/{inquiryId}/documents/{uuid}-{safeFileName}
  *   inquiries/{inquiryId}/recordings/{uuid}-{safeFileName}
+ *
+ * Phase 13B: PHOTO/DOCUMENT route under inquiries/{inquiryId}/... when no
+ * propertyId is given (the lightweight ADMIN-call-capture flow) — the
+ * caller (AttachmentsService.validateRelationshipAndResource) already
+ * guarantees exactly one of propertyId/inquiryId is set for these types.
  */
 export function generateObjectKey(params: {
   attachmentType: ObjectKeyAttachmentType;
@@ -37,9 +44,13 @@ export function generateObjectKey(params: {
 
   switch (params.attachmentType) {
     case 'PHOTO':
-      return `properties/${params.propertyId}/photos/${uuid}-${safeFileName}`;
+      return params.propertyId
+        ? `properties/${params.propertyId}/photos/${uuid}-${safeFileName}`
+        : `inquiries/${params.inquiryId}/photos/${uuid}-${safeFileName}`;
     case 'DOCUMENT':
-      return `properties/${params.propertyId}/documents/${uuid}-${safeFileName}`;
+      return params.propertyId
+        ? `properties/${params.propertyId}/documents/${uuid}-${safeFileName}`
+        : `inquiries/${params.inquiryId}/documents/${uuid}-${safeFileName}`;
     case 'RECORDING':
       return `inquiries/${params.inquiryId}/recordings/${uuid}-${safeFileName}`;
   }
@@ -62,10 +73,13 @@ export function objectKeyMatchesExpectedPrefix(params: {
     return false;
   }
 
+  const subfolder = params.attachmentType === 'PHOTO' ? 'photos' : 'documents';
   const expectedPrefix =
     params.attachmentType === 'RECORDING'
       ? `inquiries/${params.inquiryId}/recordings/`
-      : `properties/${params.propertyId}/${params.attachmentType === 'PHOTO' ? 'photos' : 'documents'}/`;
+      : params.propertyId
+        ? `properties/${params.propertyId}/${subfolder}/`
+        : `inquiries/${params.inquiryId}/${subfolder}/`;
 
   return params.objectKey.startsWith(expectedPrefix);
 }

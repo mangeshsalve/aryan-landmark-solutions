@@ -88,11 +88,20 @@ export class InquiriesService {
     if (query.propertyId) where.propertyId = query.propertyId;
 
     const [rows, total] = await Promise.all([
+      // Phase 14A: handledBy/assignedTo display names via a single
+      // relation-select per page (Prisma batches this, not one query per
+      // row) — not N+1. select (not include) keeps passwordHash and
+      // everything else off the wire at the query layer, not just via the
+      // mapper's allow-list.
       this.prisma.inquiry.findMany({
         where,
         orderBy: { createdAt: 'desc' },
         skip: (page - 1) * pageSize,
         take: pageSize,
+        include: {
+          handledBy: { select: { id: true, name: true } },
+          assignedTo: { select: { id: true, name: true } },
+        },
       }),
       this.prisma.inquiry.count({ where }),
     ]);
@@ -117,8 +126,12 @@ export class InquiriesService {
   }
 
   async create(dto: CreateInquiryDto, actor: Actor): Promise<PublicInquiryDetail> {
-    await this.assertCustomer(dto.customerId);
-    await this.assertProperty(dto.propertyId);
+    if (dto.customerId) {
+      await this.assertCustomer(dto.customerId);
+    }
+    if (dto.propertyId) {
+      await this.assertProperty(dto.propertyId);
+    }
     if (dto.handledByUserId) {
       await this.assertApplicationUser(dto.handledByUserId);
     }
@@ -143,8 +156,8 @@ export class InquiriesService {
       const inquiry = await tx.inquiry.create({
         data: {
           inquiryNumber,
-          customerId: dto.customerId,
-          propertyId: dto.propertyId,
+          customerId: dto.customerId ?? null,
+          propertyId: dto.propertyId ?? null,
           type: dto.type ?? null,
           priority: dto.priority ?? undefined,
           externalReference: dto.externalReference ?? null,
@@ -470,6 +483,16 @@ export class InquiriesService {
 
     const matches: PublicInquiryMatch[] = [];
     for (const candidate of candidates) {
+      // Phase 13B: customerId is nullable at the schema level (lightweight
+      // inquiries), but the `type: 'BUYER'` filter above already excludes
+      // those (type is only set once an EMPLOYEE completes the inquiry
+      // alongside customerId) — this is a defensive guard, not an expected
+      // path, kept so a BUYER candidate can never reach `.customer.name`
+      // on a null customer.
+      if (!candidate.customerId || !candidate.customer) {
+        continue;
+      }
+
       const locationScore = 50; // guaranteed by the preferredCity filter above
 
       const pincodeScore =
@@ -552,7 +575,7 @@ export class InquiriesService {
   private async toDetail(inquiry: {
     id: string;
     inquiryNumber: string;
-    customerId: string;
+    customerId: string | null;
     propertyId: string | null;
     type: string | null;
     priority: string;
@@ -569,8 +592,10 @@ export class InquiriesService {
     createdAt: Date;
     updatedAt: Date;
   }): Promise<PublicInquiryDetail> {
-    const [customer, property, attachments] = await Promise.all([
-      this.prisma.user.findUnique({ where: { id: inquiry.customerId } }),
+    const [customer, property, attachments, handledBy, assignedTo] = await Promise.all([
+      inquiry.customerId
+        ? this.prisma.user.findUnique({ where: { id: inquiry.customerId } })
+        : Promise.resolve(null),
       inquiry.propertyId
         ? this.prisma.property.findUnique({ where: { id: inquiry.propertyId } })
         : Promise.resolve(null),
@@ -578,10 +603,25 @@ export class InquiriesService {
         where: { inquiryId: inquiry.id },
         orderBy: [{ displayOrder: 'asc' }, { createdAt: 'desc' }],
       }),
+      // Phase 14A — display names for handledBy/assignedTo. A single
+      // detail fetch, run in parallel with the others above: not N+1
+      // (this method is never called in a loop).
+      inquiry.handledByUserId
+        ? this.prisma.user.findUnique({
+            where: { id: inquiry.handledByUserId },
+            select: { id: true, name: true },
+          })
+        : Promise.resolve(null),
+      inquiry.assignedToUserId
+        ? this.prisma.user.findUnique({
+            where: { id: inquiry.assignedToUserId },
+            select: { id: true, name: true },
+          })
+        : Promise.resolve(null),
     ]);
 
     return {
-      ...toPublicInquiry(inquiry),
+      ...toPublicInquiry({ ...inquiry, handledBy, assignedTo }),
       customer: customer ? toInquiryCustomerSummary(customer) : undefined,
       property: property ? toPublicProperty(property) : null,
       attachments: attachments.map(toPublicAttachment),

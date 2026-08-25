@@ -100,9 +100,9 @@ This is the single file metadata table.
 Examples:
 
 PHOTO:
-- property photo
-- property_id required
-- inquiry_id optional
+- property photo, or a photo captured during an ADMIN's initial call
+  (Phase 13B)
+- exactly one of property_id / inquiry_id required (never both)
 
 DOCUMENT:
 - 7/12
@@ -110,16 +110,23 @@ DOCUMENT:
 - Property Card
 - NOC
 - Other
-- property_id required
-- inquiry_id optional
+- exactly one of property_id / inquiry_id required (never both)
 
 RECORDING:
 - call recording
 - inquiry_id required
-- property_id optional
+- property_id must be absent
 
 The same table therefore supports multiple photos, documents and call
 recordings without another recording table.
+
+Phase 13B — inquiry-centric capture: an ADMIN taking a call has no
+customer or property record yet. PHOTO/DOCUMENT attachments may
+therefore reference the inquiry instead of a property
+(`chk_attachment_relationship` requires `property_id IS NOT NULL OR
+inquiry_id IS NOT NULL`, not just `property_id`), so they can be
+captured before either master record exists. The property-linked flow
+is unchanged and still fully supported.
 
 ### Size
 
@@ -139,6 +146,12 @@ For PHOTO and RECORDING it is NULL.
 ## 4. inquiries
 
 Connects a customer with a property and stores the current inquiry state.
+
+`customer_id` (nullable, Phase 13B) and `property_id` (already nullable) —
+both NULL on a lightweight, ADMIN-created inquiry captured during a call,
+before the customer or property has been identified. An EMPLOYEE fills
+these in later via `PATCH /inquiries/{id}` once they've reviewed the
+recording/photos/documents attached to the inquiry.
 
 Important fields:
 - inquiry_number

@@ -154,7 +154,9 @@ CREATE TABLE inquiries (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   inquiry_number VARCHAR(50) NOT NULL UNIQUE,
 
-  customer_id UUID NOT NULL REFERENCES users(id),
+  -- Nullable as of Phase 13B: a lightweight, ADMIN-created inquiry can
+  -- exist before the customer has been identified.
+  customer_id UUID REFERENCES users(id),
   property_id UUID REFERENCES properties(id),
 
   type inquiry_type,
@@ -222,10 +224,14 @@ CREATE TABLE attachments (
   uploaded_by UUID NOT NULL REFERENCES users(id),
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 
+  -- Phase 13B: PHOTO/DOCUMENT require property_id OR inquiry_id (not
+  -- both) — the inquiry_id branch supports the lightweight ADMIN-call
+  -- capture flow, where photos/documents are gathered before a property
+  -- record exists. RECORDING is unchanged (inquiry_id only).
   CONSTRAINT chk_attachment_relationship CHECK (
-    (attachment_type='PHOTO' AND property_id IS NOT NULL)
+    (attachment_type='PHOTO' AND (property_id IS NOT NULL OR inquiry_id IS NOT NULL))
     OR
-    (attachment_type='DOCUMENT' AND property_id IS NOT NULL)
+    (attachment_type='DOCUMENT' AND (property_id IS NOT NULL OR inquiry_id IS NOT NULL))
     OR
     (attachment_type='RECORDING' AND inquiry_id IS NOT NULL)
   ),

@@ -107,11 +107,16 @@ export class AttachmentsService {
       // Prisma's DSL can't express and — since no migration has ever run
       // in this environment (see Phase 5 report) — isn't guaranteed to
       // exist at the database level yet either. Enforced here in the
-      // meantime: unset any existing primary photo for this property
+      // meantime: unset any existing primary photo for this resource
       // before inserting a new primary one, inside the same transaction.
+      // Phase 13B: scoped by whichever of propertyId/inquiryId is set —
+      // scoping by propertyId when it's undefined would match every
+      // inquiry-linked primary photo across the whole table.
       if (dto.attachmentType === 'PHOTO' && dto.isPrimary) {
         await tx.attachment.updateMany({
-          where: { propertyId: dto.propertyId, attachmentType: 'PHOTO', isPrimary: true },
+          where: dto.propertyId
+            ? { propertyId: dto.propertyId, attachmentType: 'PHOTO', isPrimary: true }
+            : { inquiryId: dto.inquiryId, attachmentType: 'PHOTO', isPrimary: true },
           data: { isPrimary: false },
         });
       }
@@ -201,6 +206,12 @@ export class AttachmentsService {
    * (schema.sql) at the application layer, plus existence of the
    * referenced property/inquiry. Shared by createUploadUrl and finalize
    * so the rule can't drift between the two steps.
+   *
+   * Phase 13B: PHOTO/DOCUMENT may reference EITHER a property (the
+   * original, still-supported flow) OR an inquiry (the lightweight
+   * ADMIN-call-capture flow, where no property exists yet) — never both,
+   * since a dual-linked attachment isn't a confirmed requirement yet (see
+   * Phase 13B report's "remaining architectural decision").
    */
   private async validateRelationshipAndResource(dto: {
     attachmentType: 'PHOTO' | 'DOCUMENT' | 'RECORDING';
@@ -209,22 +220,31 @@ export class AttachmentsService {
     documentType?: string;
   }): Promise<void> {
     if (dto.attachmentType === 'PHOTO' || dto.attachmentType === 'DOCUMENT') {
-      if (!dto.propertyId) {
+      if (!dto.propertyId && !dto.inquiryId) {
         throw new AttachmentRelationshipInvalidException(
-          `propertyId is required when attachmentType is ${dto.attachmentType}.`,
+          `Either propertyId or inquiryId is required when attachmentType is ${dto.attachmentType}.`,
         );
       }
-      if (dto.inquiryId) {
+      if (dto.propertyId && dto.inquiryId) {
         throw new AttachmentRelationshipInvalidException(
-          `inquiryId must not be set when attachmentType is ${dto.attachmentType}.`,
+          `propertyId and inquiryId must not both be set when attachmentType is ${dto.attachmentType}.`,
         );
       }
 
-      const property = await this.prisma.property.findUnique({ where: { id: dto.propertyId } });
-      if (!property) {
-        throw new AttachmentRelationshipInvalidException(
-          'propertyId does not reference an existing property.',
-        );
+      if (dto.propertyId) {
+        const property = await this.prisma.property.findUnique({ where: { id: dto.propertyId } });
+        if (!property) {
+          throw new AttachmentRelationshipInvalidException(
+            'propertyId does not reference an existing property.',
+          );
+        }
+      } else {
+        const inquiry = await this.prisma.inquiry.findUnique({ where: { id: dto.inquiryId } });
+        if (!inquiry) {
+          throw new AttachmentRelationshipInvalidException(
+            'inquiryId does not reference an existing inquiry.',
+          );
+        }
       }
     }
 
