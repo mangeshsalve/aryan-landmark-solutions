@@ -88,6 +88,43 @@ paths:
           $ref: '#/components/responses/Unauthorized'
 
   /master/users:
+    get:
+      tags: [Master Management]
+      summary: List ADMIN/EMPLOYEE users (Master Admin user management)
+      description: |
+        Phase 15A. Same query semantics as GET /users (page, pageSize,
+        role, status, search — all optional) reachable under the
+        master-JWT boundary, so a MASTER account (which cannot hold an
+        application JWT) can still list users for the Master Admin UI.
+      security:
+        - masterBearer: []
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - name: role
+          in: query
+          schema:
+            type: string
+            enum: [ADMIN, EMPLOYEE]
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [ACTIVE, INACTIVE, BLOCKED]
+        - name: search
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Users
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
     post:
       tags: [Master Management]
       summary: Create ADMIN or EMPLOYEE
@@ -106,6 +143,53 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/UserResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /master/users/{id}:
+    patch:
+      tags: [Master Management]
+      summary: Edit an ADMIN/EMPLOYEE, incl. activate/deactivate and role change
+      description: |
+        Phase 15A. MASTER-only. Scoped to userType=APPLICATION_USER rows
+        only — a MASTER can never edit its own or another MASTER's row,
+        or any CUSTOMER row, through this endpoint. All fields optional
+        (partial update). See UpdateApplicationUserRequest for the
+        role/status take-effect-on-next-login caveat.
+      security:
+        - masterBearer: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateApplicationUserRequest'
+      responses:
+        '200':
+          description: User updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
 
   /master/customers:
     post:
@@ -970,6 +1054,48 @@ components:
         role:
           type: string
           enum: [ADMIN, EMPLOYEE]
+
+    UpdateApplicationUserRequest:
+      type: object
+      description: |
+        Phase 15A — MASTER-only partial update of an ADMIN/EMPLOYEE.
+        Everything optional. Excludes userId (stable business identifier)
+        and password (password change is not part of this endpoint — no
+        password-reset flow exists yet). role stays restricted to
+        ADMIN/EMPLOYEE — MASTER can never be assigned here either.
+
+        A role or status change takes effect for future logins only: an
+        already-issued JWT keeps its original role/status claims until it
+        expires (up to 1 hour) or the user logs in again — there is no
+        token revocation mechanism in this project.
+      properties:
+        name:
+          type: string
+        email:
+          type: string
+          format: email
+        mobile:
+          type: string
+        alternateMobile:
+          type: string
+        address:
+          type: string
+        city:
+          type: string
+        state:
+          type: string
+        pincode:
+          type: string
+        role:
+          type: string
+          enum: [ADMIN, EMPLOYEE]
+        status:
+          type: string
+          enum: [ACTIVE, INACTIVE, BLOCKED]
+          description: |
+            ACTIVE users can log in; INACTIVE/BLOCKED are rejected at
+            POST /auth/login (existing behavior, unchanged by this
+            phase) but a currently-held JWT is not revoked immediately.
 
     CreateCustomerRequest:
       type: object
