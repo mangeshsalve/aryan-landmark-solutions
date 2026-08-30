@@ -12,6 +12,7 @@ import {
 } from 'class-validator';
 
 const PROPERTY_CATEGORIES = ['RESIDENTIAL', 'INDUSTRIAL', 'COMMERCIAL', 'AGRICULTURAL'] as const;
+const PROPERTY_AREA_UNITS = ['SQ_FT', 'SQ_YD', 'SQ_M', 'ACRE', 'GUNTHA', 'HECTARE'] as const;
 
 /**
  * Matches components.schemas.CreatePropertyRequest in docs/api/openapi.yaml.
@@ -19,6 +20,16 @@ const PROPERTY_CATEGORIES = ['RESIDENTIAL', 'INDUSTRIAL', 'COMMERCIAL', 'AGRICUL
  * accepted from the client (status defaults to AVAILABLE at the database
  * level; createdBy/updatedBy are derived from the authenticated JWT in
  * PropertiesService).
+ *
+ * areaUnit is a controlled list (was free-text before the phase that
+ * converted properties.area_unit to a real enum; SQ_YD/SQ_M added later,
+ * purely additive — see the migration that added them).
+ *
+ * priceUnit is deliberately absent (this phase) — this application is
+ * India-only, price is always INR; PropertiesService.create() hardcodes
+ * it rather than reading it from the request, so it's never client-
+ * settable. The database column is untouched (still present, still
+ * 'INR' on every row) — only the request contract changed.
  */
 export class CreatePropertyDto {
   @ApiPropertyOptional({ description: 'Optional — generated server-side if omitted' })
@@ -43,23 +54,16 @@ export class CreatePropertyDto {
   @Min(0)
   area?: number;
 
-  @ApiPropertyOptional()
+  @ApiPropertyOptional({ enum: PROPERTY_AREA_UNITS })
   @IsOptional()
-  @IsString()
-  @MaxLength(20)
-  areaUnit?: string;
+  @IsIn(PROPERTY_AREA_UNITS)
+  areaUnit?: (typeof PROPERTY_AREA_UNITS)[number];
 
   @ApiPropertyOptional()
   @IsOptional()
   @IsNumber()
   @Min(0)
   price?: number;
-
-  @ApiPropertyOptional()
-  @IsOptional()
-  @IsString()
-  @MaxLength(20)
-  priceUnit?: string;
 
   @ApiPropertyOptional()
   @IsOptional()

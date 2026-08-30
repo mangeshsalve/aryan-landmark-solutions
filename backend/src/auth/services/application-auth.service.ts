@@ -44,9 +44,9 @@ export class ApplicationAuthService {
     private readonly tokenService: TokenService,
   ) {}
 
-  async login(username: string, password: string): Promise<ApplicationLoginResult> {
+  async login(email: string, password: string): Promise<ApplicationLoginResult> {
     const user = await this.prisma.user.findFirst({
-      where: { userId: username, userType: 'APPLICATION_USER' },
+      where: { email: { equals: email, mode: 'insensitive' }, userType: 'APPLICATION_USER' },
     });
 
     if (!user || !user.passwordHash || !user.role) {

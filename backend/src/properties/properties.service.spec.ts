@@ -1,4 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
+import { AttachmentsService } from '../attachments/attachments.service';
 import { AuditService } from '../audit/audit.service';
 import {
   ForbiddenRoleException,
@@ -20,8 +21,11 @@ describe('PropertiesService (critical paths)', () => {
       update: jest.Mock;
     };
     attachment: { findMany: jest.Mock };
+    $transaction: jest.Mock;
   };
   let audit: { record: jest.Mock };
+  let attachments: { list: jest.Mock; remove: jest.Mock };
+  let inquiryUpdateMany: jest.Mock;
 
   const adminActor = { userId: 'admin-uuid-1', role: 'ADMIN' as const };
   const employeeActor = { userId: 'employee-uuid-1', role: 'EMPLOYEE' as const };
@@ -50,6 +54,8 @@ describe('PropertiesService (critical paths)', () => {
   };
 
   beforeEach(async () => {
+    inquiryUpdateMany = jest.fn().mockResolvedValue({ count: 0 });
+    const propertyUpdate = jest.fn();
     prisma = {
       property: {
         findFirst: jest.fn(),
@@ -57,17 +63,28 @@ describe('PropertiesService (critical paths)', () => {
         findMany: jest.fn(),
         count: jest.fn(),
         create: jest.fn(),
-        update: jest.fn(),
+        update: propertyUpdate,
       },
       attachment: { findMany: jest.fn().mockResolvedValue([]) },
+      // update() is transactional (this phase) — the same underlying
+      // mock function is used for both prisma.property.update and
+      // tx.property.update, so every existing test's
+      // `prisma.property.update.mockResolvedValue(...)` keeps working
+      // unchanged; tx.inquiry.updateMany is the new SELLER-propagation
+      // call, asserted on directly in the new tests below.
+      $transaction: jest.fn((cb: (tx: unknown) => unknown) =>
+        cb({ property: { update: propertyUpdate }, inquiry: { updateMany: inquiryUpdateMany } }),
+      ),
     };
     audit = { record: jest.fn().mockResolvedValue(undefined) };
+    attachments = { list: jest.fn().mockResolvedValue([]), remove: jest.fn() };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         PropertiesService,
         { provide: PrismaService, useValue: prisma },
         { provide: AuditService, useValue: audit },
+        { provide: AttachmentsService, useValue: attachments },
       ],
     }).compile();
 
@@ -245,5 +262,56 @@ describe('PropertiesService (critical paths)', () => {
       service.update('prop-1', { isPublic: true }, employeeActor),
     ).rejects.toBeInstanceOf(ForbiddenRoleException);
     expect(prisma.property.update).not.toHaveBeenCalled();
+  });
+
+  // This phase — Property→Inquiry location propagation, atomic with the
+  // property write (Option A, approved plan).
+  describe('update() propagates location changes to linked SELLER inquiries', () => {
+    it('propagates when city/state/pincode/locality actually change', async () => {
+      prisma.property.findUnique.mockResolvedValueOnce(baseRow); // city: null originally
+      prisma.property.update.mockResolvedValue({
+        ...baseRow,
+        city: 'Pune',
+        state: 'Maharashtra',
+        pincode: '411001',
+        locality: 'Bhosari',
+      });
+
+      await service.update(
+        'prop-1',
+        { city: 'Pune', state: 'Maharashtra', pincode: '411001', locality: 'Bhosari' },
+        adminActor,
+      );
+
+      expect(inquiryUpdateMany).toHaveBeenCalledWith({
+        where: { propertyId: 'prop-1', type: 'SELLER' },
+        data: { city: 'Pune', state: 'Maharashtra', pincode: '411001', locality: 'Bhosari' },
+      });
+    });
+
+    it('does NOT propagate when location fields are unchanged (e.g. only propertyType edited)', async () => {
+      const propWithLocation = {
+        ...baseRow,
+        city: 'Pune',
+        state: 'MH',
+        pincode: '411001',
+        locality: 'Bhosari',
+      };
+      prisma.property.findUnique.mockResolvedValueOnce(propWithLocation);
+      prisma.property.update.mockResolvedValue({ ...propWithLocation, propertyType: 'Bungalow' });
+
+      await service.update('prop-1', { propertyType: 'Bungalow' }, adminActor);
+
+      expect(inquiryUpdateMany).not.toHaveBeenCalled();
+    });
+
+    it('propagation and the property write happen inside the same transaction', async () => {
+      prisma.property.findUnique.mockResolvedValueOnce(baseRow);
+      prisma.property.update.mockResolvedValue({ ...baseRow, city: 'Pune' });
+
+      await service.update('prop-1', { city: 'Pune' }, adminActor);
+
+      expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    });
   });
 });

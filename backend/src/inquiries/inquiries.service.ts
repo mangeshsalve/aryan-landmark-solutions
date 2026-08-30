@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import {
   CustomerNotFoundException,
+  ForbiddenRoleException,
   InquiryAlreadySubmittedException,
   InquiryAssignmentInvalidException,
   InquiryMatchingInvalidException,
@@ -16,6 +17,7 @@ import { AuditService } from '../audit/audit.service';
 import { AttachmentsService } from '../attachments/attachments.service';
 import { toPublicAttachment } from '../attachments/attachment.mapper';
 import { ListAttachmentsQueryDto } from '../attachments/dto/list-attachments-query.dto';
+import { NotificationsService } from '../notifications/notifications.service';
 import { toPublicProperty } from '../properties/property.mapper';
 import { toPublicAssignment, PublicAssignment } from './assignment.mapper';
 import { AssignInquiryDto } from './dto/assign-inquiry.dto';
@@ -31,6 +33,12 @@ import {
   PublicInquiry,
   PublicInquiryDetail,
 } from './inquiry.mapper';
+import {
+  deriveSyncedLocationFromProperty,
+  normalizeLocationValue,
+  scoreLocationQuality,
+  PropertyLocationSnapshot,
+} from './location-match.util';
 
 export interface PaginatedResult<T> {
   data: T[];
@@ -45,6 +53,12 @@ interface Actor {
 }
 
 const MAX_INQUIRY_NUMBER_ATTEMPTS = 5;
+
+/** Prisma Decimal fields come back as Decimal.js-like objects at runtime, not plain numbers. */
+function toNullableNumber(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  return Number(value);
+}
 
 /**
  * Inquiry Management (Phases 6-7). Connects a customer (users.userType=
@@ -73,6 +87,7 @@ export class InquiriesService {
     private readonly prisma: PrismaService,
     private readonly auditService: AuditService,
     private readonly attachmentsService: AttachmentsService,
+    private readonly notificationsService: NotificationsService,
   ) {}
 
   async list(query: ListInquiriesQueryDto): Promise<PaginatedResult<PublicInquiry>> {
@@ -92,7 +107,9 @@ export class InquiriesService {
       // relation-select per page (Prisma batches this, not one query per
       // row) — not N+1. select (not include) keeps passwordHash and
       // everything else off the wire at the query layer, not just via the
-      // mapper's allow-list.
+      // mapper's allow-list. customer (this phase) follows the exact same
+      // pattern, for customerName in the list response — still one query
+      // total, regardless of page size.
       this.prisma.inquiry.findMany({
         where,
         orderBy: { createdAt: 'desc' },
@@ -101,6 +118,7 @@ export class InquiriesService {
         include: {
           handledBy: { select: { id: true, name: true } },
           assignedTo: { select: { id: true, name: true } },
+          customer: { select: { name: true } },
         },
       }),
       this.prisma.inquiry.count({ where }),
@@ -129,8 +147,9 @@ export class InquiriesService {
     if (dto.customerId) {
       await this.assertCustomer(dto.customerId);
     }
+    let property: PropertyLocationSnapshot | null = null;
     if (dto.propertyId) {
-      await this.assertProperty(dto.propertyId);
+      property = await this.assertProperty(dto.propertyId);
     }
     if (dto.handledByUserId) {
       await this.assertApplicationUser(dto.handledByUserId);
@@ -138,6 +157,23 @@ export class InquiriesService {
     if (dto.assignedToUserId) {
       await this.assertAssignableUser(dto.assignedToUserId);
     }
+
+    // Location sync (this phase, approved plan) — a SELLER inquiry
+    // created with a property linked gets its location from that
+    // property; any city/state/pincode/locality the client also sent in
+    // this same request are overridden, not merged, since the property
+    // is authoritative the moment it's linked. Every other case (BUYER,
+    // or a still-lightweight SELLER with no property yet) uses whatever
+    // the client sent directly.
+    const location =
+      dto.type === 'SELLER' && property
+        ? deriveSyncedLocationFromProperty(property)
+        : {
+            city: normalizeLocationValue(dto.city),
+            state: normalizeLocationValue(dto.state),
+            pincode: normalizeLocationValue(dto.pincode),
+            locality: normalizeLocationValue(dto.locality),
+          };
 
     // An EMPLOYEE creating an inquiry defaults to handling/self-assigning
     // it when the request doesn't name someone else — no default for
@@ -164,8 +200,10 @@ export class InquiriesService {
           handledByUserId,
           assignedToUserId,
           remarks: dto.remarks ?? null,
-          preferredCity: dto.preferredCity ?? null,
-          preferredPincode: dto.preferredPincode ?? null,
+          city: location.city,
+          state: location.state,
+          pincode: location.pincode,
+          locality: location.locality,
           maxBudget: dto.maxBudget ?? null,
           createdByUserId: actor.userId,
           updatedByUserId: actor.userId,
@@ -191,12 +229,19 @@ export class InquiriesService {
       return inquiry;
     });
 
+    if (assignedToUserId) {
+      await this.notifyInquiryAssigned(actor, created.id, inquiryNumber, assignedToUserId);
+    }
+
     await this.auditService.record({
       userId: actor.userId,
       entityType: 'INQUIRY',
       entityId: created.id,
       action: 'INQUIRY_CREATED',
-      newValues: { ...dto, inquiryNumber, handledByUserId, assignedToUserId },
+      // location reflects what was actually persisted, not dto's raw
+      // values — for a SELLER+property inquiry these can differ (the
+      // property's location overrides whatever the client sent).
+      newValues: { ...dto, inquiryNumber, handledByUserId, assignedToUserId, ...location },
       ipAddress: actor.ipAddress,
       userAgent: actor.userAgent,
     });
@@ -210,12 +255,32 @@ export class InquiriesService {
       throw new InquiryNotFoundException();
     }
 
+    // Phase 18A — ADMIN can edit any inquiry; EMPLOYEE can edit only the
+    // inquiry currently assigned to them. Checked first, before any other
+    // validation, so an unauthorized caller can't learn anything about
+    // the request's validity. See assertCanModifyInquiry()'s doc comment
+    // (Phase 23A) — the same rule is now shared with assign() and
+    // setPublicVisibility().
+    this.assertCanModifyInquiry(existing, actor);
+
     if (dto.customerId && dto.customerId !== existing.customerId) {
       await this.assertCustomer(dto.customerId);
     }
-    if (dto.propertyId && dto.propertyId !== existing.propertyId) {
-      await this.assertProperty(dto.propertyId);
+
+    // Phase [this] — a NEW, different, non-null propertyId being linked
+    // in this request (not just present-and-unchanged, and not the
+    // pre-existing null-doesn't-actually-clear quirk of
+    // `dto.propertyId ?? undefined` below) is what triggers a location
+    // re-sync from the newly-linked property.
+    const isLinkingNewProperty =
+      dto.propertyId !== undefined &&
+      dto.propertyId !== null &&
+      dto.propertyId !== existing.propertyId;
+    let newProperty: PropertyLocationSnapshot | null = null;
+    if (isLinkingNewProperty) {
+      newProperty = await this.assertProperty(dto.propertyId as string);
     }
+
     if (dto.handledByUserId && dto.handledByUserId !== existing.handledByUserId) {
       await this.assertApplicationUser(dto.handledByUserId);
     }
@@ -224,6 +289,35 @@ export class InquiriesService {
       dto.assignedToUserId !== undefined && dto.assignedToUserId !== existing.assignedToUserId;
     if (isReassigning) {
       await this.assertAssignableUser(dto.assignedToUserId as string);
+    }
+
+    // Location sync (this phase, approved plan). Mirrors what actually
+    // gets persisted for propertyId itself (`dto.propertyId ?? undefined`
+    // below — a null doesn't clear it), so this reads the *effective*
+    // resulting type/propertyId, not just the raw dto values.
+    const resultingType = dto.type ?? existing.type;
+    const resultingPropertyId = dto.propertyId ?? existing.propertyId;
+    const sellerWithProperty = resultingType === 'SELLER' && !!resultingPropertyId;
+
+    let locationUpdate: Partial<PropertyLocationSnapshot>;
+    if (sellerWithProperty) {
+      // For a SELLER with a linked property, location is always
+      // server-controlled: re-synced when a *new* property is linked in
+      // this request, otherwise left completely untouched — any
+      // city/state/pincode/locality the client also sent are silently
+      // ignored, never merged, exactly like create()'s override rule.
+      locationUpdate =
+        isLinkingNewProperty && newProperty ? deriveSyncedLocationFromProperty(newProperty) : {};
+    } else {
+      // BUYER, or a still-lightweight SELLER with no property yet:
+      // directly client-editable, same partial-update semantics as every
+      // other field here (omitted ⇒ untouched).
+      locationUpdate = {
+        city: dto.city !== undefined ? normalizeLocationValue(dto.city) : undefined,
+        state: dto.state !== undefined ? normalizeLocationValue(dto.state) : undefined,
+        pincode: dto.pincode !== undefined ? normalizeLocationValue(dto.pincode) : undefined,
+        locality: dto.locality !== undefined ? normalizeLocationValue(dto.locality) : undefined,
+      };
     }
 
     const oldValues = {
@@ -236,8 +330,10 @@ export class InquiriesService {
       handledByUserId: existing.handledByUserId,
       assignedToUserId: existing.assignedToUserId,
       remarks: existing.remarks,
-      preferredCity: existing.preferredCity,
-      preferredPincode: existing.preferredPincode,
+      city: existing.city,
+      state: existing.state,
+      pincode: existing.pincode,
+      locality: existing.locality,
       maxBudget: existing.maxBudget,
     };
 
@@ -251,11 +347,21 @@ export class InquiriesService {
           priority: dto.priority ?? undefined,
           status: dto.status ?? undefined,
           externalReference: dto.externalReference ?? undefined,
-          handledByUserId: dto.handledByUserId ?? undefined,
+          // Phase 18A Requirement 3: reassigning forces handledByUserId to
+          // the same newly-assigned user (both current fields point at
+          // whoever is now assigned) — a raw dto.handledByUserId is only
+          // honored when this update is NOT a reassignment, preserving the
+          // pre-existing "these can independently diverge" capability
+          // outside of the assignment moment itself (see class doc comment).
+          handledByUserId: isReassigning
+            ? dto.assignedToUserId
+            : (dto.handledByUserId ?? undefined),
           assignedToUserId: isReassigning ? dto.assignedToUserId : undefined,
           remarks: dto.remarks ?? undefined,
-          preferredCity: dto.preferredCity ?? undefined,
-          preferredPincode: dto.preferredPincode ?? undefined,
+          city: locationUpdate.city,
+          state: locationUpdate.state,
+          pincode: locationUpdate.pincode,
+          locality: locationUpdate.locality,
           maxBudget: dto.maxBudget ?? undefined,
           updatedByUserId: actor.userId,
         },
@@ -275,13 +381,25 @@ export class InquiriesService {
       return result;
     });
 
+    if (isReassigning) {
+      await this.notifyInquiryAssigned(
+        actor,
+        id,
+        existing.inquiryNumber,
+        dto.assignedToUserId as string,
+      );
+    }
+
     await this.auditService.record({
       userId: actor.userId,
       entityType: 'INQUIRY',
       entityId: id,
       action: 'INQUIRY_UPDATED',
       oldValues,
-      newValues: { ...dto },
+      // location reflects what was actually persisted, not dto's raw
+      // values — for a synced SELLER these can differ (see
+      // locationUpdate above).
+      newValues: { ...dto, ...locationUpdate },
       ipAddress: actor.ipAddress,
       userAgent: actor.userAgent,
     });
@@ -377,18 +495,38 @@ export class InquiriesService {
     return this.getById(id);
   }
 
+  /**
+   * Phase 23A — ADMIN can assign/reassign any inquiry; EMPLOYEE only an
+   * inquiry currently assigned to them (assertCanModifyInquiry, same rule
+   * as update()/setPublicVisibility()). An unassigned inquiry
+   * (assignedToUserId=null) is therefore not takeable by an EMPLOYEE
+   * through this endpoint either — null never equals actor.userId, so the
+   * same check that blocks "someone else's inquiry" also blocks "nobody's
+   * inquiry yet," consistent with update()'s pre-existing behavior for
+   * unassigned inquiries (no separate carve-out exists anywhere else in
+   * this codebase for that case).
+   */
   async assign(id: string, dto: AssignInquiryDto, actor: Actor): Promise<PublicInquiryDetail> {
     const existing = await this.prisma.inquiry.findUnique({ where: { id } });
     if (!existing) {
       throw new InquiryNotFoundException();
     }
 
+    this.assertCanModifyInquiry(existing, actor);
+
     await this.assertAssignableUser(dto.assignedToUserId);
 
     await this.prisma.$transaction(async (tx: Prisma.TransactionClient) => {
       await tx.inquiry.update({
         where: { id },
-        data: { assignedToUserId: dto.assignedToUserId, updatedByUserId: actor.userId },
+        data: {
+          assignedToUserId: dto.assignedToUserId,
+          // Phase 18A Requirement 3: assignment/reassignment always syncs
+          // handledByUserId to the same user — both current fields point
+          // at whoever is now assigned.
+          handledByUserId: dto.assignedToUserId,
+          updatedByUserId: actor.userId,
+        },
       });
 
       await tx.inquiryAssignment.create({
@@ -401,6 +539,8 @@ export class InquiriesService {
         },
       });
     });
+
+    await this.notifyInquiryAssigned(actor, id, existing.inquiryNumber, dto.assignedToUserId);
 
     await this.auditService.record({
       userId: actor.userId,
@@ -417,110 +557,173 @@ export class InquiriesService {
   }
 
   /**
-   * GET /inquiries/{id}/matches (Phase 11) — Seller → Buyer matching only
-   * (see Phase 11 report Part 8; reverse Buyer → Seller matching was not
-   * requested and is not implemented).
+   * GET /inquiries/{id}/matches (Phase 11; bidirectional as of Phase
+   * 19A; unified location fields and new algorithm this phase). SELLER
+   * source → matching BUYER inquiries, or BUYER source → matching SELLER
+   * inquiries — genuinely symmetric now, both directions share
+   * findOppositeMatches() below, since city/state/pincode/locality live
+   * directly on Inquiry for both types (no more "SELLER's location comes
+   * from Property, BUYER's from Inquiry" special-casing the two old
+   * near-duplicate methods needed). Budget/price stays asymmetric by
+   * design (unchanged this phase) — SELLER's number always comes from
+   * its linked Property.price, BUYER's from Inquiry.maxBudget directly.
    *
-   * Weights: location 50, pincode 30, budget 20 (max 100); only scores
-   * >= 70 are returned, sorted highest first. Because 30+20=50 < 70,
-   * reaching the threshold structurally requires the location criterion
-   * to match — every returned match has already matched on city. This
-   * is a mathematical consequence of the given weights, not an extra
-   * invented rule, and is exploited below as a genuine (not speculative)
-   * query optimization: candidates are pre-filtered to the seller
-   * property's city at the database level via the new idx_inquiries_type
-   * index, rather than loading every BUYER inquiry into memory.
+   * There is no area/category/propertyType field on Inquiry to compare
+   * against Property.area/category/propertyType, so — despite those
+   * being available on Property — they are NOT used as matching criteria
+   * in either direction (unchanged from Phase 19A).
    *
-   * Criteria (each binary — full points or none, no partial credit):
-   *  - location (50): candidate.preferredCity equals property.city
-   *    (case-insensitive)
-   *  - pincode  (30): candidate.preferredPincode equals property.pincode
-   *    (exact string match; no geographic distance, no address parsing)
-   *  - budget   (20): property.price <= candidate.maxBudget (both sides
-   *    assumed to be the same currency/unit — every property in this
-   *    project uses priceUnit=INR; no conversion is implemented). Missing
-   *    data on either side scores 0, never assumed to match.
+   * status is deliberately not checked at all — never was. What IS
+   * required: a SELLER needs propertyId (a structural precondition — no
+   * property means there is no price to match against, so this is a
+   * 400, not an empty result); a BUYER (or a still-lightweight SELLER
+   * with no property) with no pincode yet is a plain nullable-field case
+   * — findOppositeMatches() returns an empty array for that, never a
+   * fabricated match, never a throw.
+   *
+   * See location-match.util.ts for the full scoring algorithm: pincode
+   * is a mandatory exact-match gate (30 pts); city is normalized exact
+   * comparison, not fuzzy (up to 50 pts); locality is token-based fuzzy
+   * comparison (up to 50 pts); city and locality are combined via MAX,
+   * never summed; budget is unchanged (20 pts). Achievable totals are
+   * therefore 30/50/80/100 — see that file's doc comment for why the
+   * unchanged 70 threshold effectively requires 80 in practice.
    */
   async findMatches(id: string): Promise<PublicInquiryMatch[]> {
-    const sellerInquiry = await this.prisma.inquiry.findUnique({ where: { id } });
-    if (!sellerInquiry) {
+    const sourceInquiry = await this.prisma.inquiry.findUnique({
+      where: { id },
+      include: { property: true },
+    });
+    if (!sourceInquiry) {
       throw new InquiryNotFoundException();
     }
-    if (sellerInquiry.type !== 'SELLER') {
-      throw new InquiryMatchingInvalidException(
-        'Matching is only available for inquiries with type=SELLER.',
-      );
+
+    if (sourceInquiry.type === 'SELLER') {
+      if (!sourceInquiry.propertyId) {
+        throw new InquiryMatchingInvalidException(
+          'This inquiry has no associated property to match against.',
+        );
+      }
+      if (!sourceInquiry.property) {
+        throw new PropertyNotFoundException();
+      }
+      return this.findOppositeMatches(sourceInquiry, 'BUYER');
     }
-    if (!sellerInquiry.propertyId) {
-      throw new InquiryMatchingInvalidException(
-        'This inquiry has no associated property to match against.',
-      );
+    if (sourceInquiry.type === 'BUYER') {
+      return this.findOppositeMatches(sourceInquiry, 'SELLER');
     }
 
-    const property = await this.prisma.property.findUnique({
-      where: { id: sellerInquiry.propertyId },
-    });
-    if (!property) {
-      throw new PropertyNotFoundException();
-    }
+    throw new InquiryMatchingInvalidException(
+      'Matching requires the inquiry to have type=BUYER or type=SELLER.',
+    );
+  }
 
-    // No city on the property means no candidate can ever reach the
-    // mandatory location score — short-circuit rather than loading and
-    // scoring a candidate set that can only ever produce zero results.
-    if (!property.city) {
+  /**
+   * The shared matching engine for both directions (this phase). `id: {
+   * not: id }` is an explicit self-match guard — structurally redundant
+   * today (a source can never satisfy a `type: oppositeType` filter
+   * matching its own type) but kept as a defense-in-depth invariant
+   * rather than relying solely on that.
+   */
+  private async findOppositeMatches(
+    sourceInquiry: {
+      id: string;
+      city: string | null;
+      locality: string | null;
+      pincode: string | null;
+      maxBudget: unknown;
+      property: { price: unknown } | null;
+    },
+    oppositeType: 'BUYER' | 'SELLER',
+  ): Promise<PublicInquiryMatch[]> {
+    // Pincode is the mandatory gate — a source with none can never reach
+    // the threshold, so short-circuit rather than loading and scoring a
+    // candidate set that can only ever produce zero results. Already
+    // normalized (trimmed) at write time, so a direct DB equality filter
+    // below is safe.
+    if (!sourceInquiry.pincode) {
       return [];
     }
 
     const candidates = await this.prisma.inquiry.findMany({
       where: {
-        type: 'BUYER',
-        preferredCity: { equals: property.city, mode: 'insensitive' },
+        id: { not: sourceInquiry.id },
+        type: oppositeType,
+        pincode: sourceInquiry.pincode,
       },
-      include: { customer: true },
+      include: oppositeType === 'SELLER' ? { customer: true, property: true } : { customer: true },
     });
 
-    const propertyPrice = property.price === null ? null : Number(property.price);
+    // Budget/price stays asymmetric (unchanged this phase): the SELLER
+    // side's number always comes from its linked Property.price, the
+    // BUYER side's always from Inquiry.maxBudget directly.
+    const sourcePrice =
+      oppositeType === 'BUYER' // source is SELLER, matching against BUYER candidates
+        ? toNullableNumber(sourceInquiry.property?.price)
+        : null;
+    const sourceMaxBudget =
+      oppositeType === 'SELLER' // source is BUYER, matching against SELLER candidates
+        ? toNullableNumber(sourceInquiry.maxBudget)
+        : null;
 
     const matches: PublicInquiryMatch[] = [];
-    for (const candidate of candidates) {
-      // Phase 13B: customerId is nullable at the schema level (lightweight
-      // inquiries), but the `type: 'BUYER'` filter above already excludes
-      // those (type is only set once an EMPLOYEE completes the inquiry
-      // alongside customerId) — this is a defensive guard, not an expected
-      // path, kept so a BUYER candidate can never reach `.customer.name`
-      // on a null customer.
+    for (const candidate of candidates as Array<{
+      id: string;
+      customerId: string | null;
+      customer: { name: string; mobile: string | null } | null;
+      propertyId: string | null;
+      city: string | null;
+      state: string | null;
+      pincode: string | null;
+      locality: string | null;
+      maxBudget: unknown;
+      property?: { price: unknown } | null;
+    }>) {
+      // Defensive guard, not an expected path (see class-level note on
+      // why this can't happen through the normal API) — a candidate
+      // missing its customer, or (for a SELLER candidate) its property,
+      // is skipped rather than assumed valid.
       if (!candidate.customerId || !candidate.customer) {
         continue;
       }
+      if (oppositeType === 'SELLER' && !candidate.property) {
+        continue;
+      }
 
-      const locationScore = 50; // guaranteed by the preferredCity filter above
+      const locationScore = scoreLocationQuality(sourceInquiry, candidate);
 
-      const pincodeScore =
-        candidate.preferredPincode !== null &&
-        property.pincode !== null &&
-        candidate.preferredPincode === property.pincode
-          ? 30
-          : 0;
+      let budgetScore = 0;
+      if (oppositeType === 'BUYER') {
+        const candidateBudget = toNullableNumber(candidate.maxBudget);
+        budgetScore =
+          sourcePrice !== null && candidateBudget !== null && sourcePrice <= candidateBudget
+            ? 20
+            : 0;
+      } else {
+        const candidatePrice = toNullableNumber(candidate.property?.price);
+        budgetScore =
+          sourceMaxBudget !== null && candidatePrice !== null && candidatePrice <= sourceMaxBudget
+            ? 20
+            : 0;
+      }
 
-      const candidateMaxBudget = candidate.maxBudget === null ? null : Number(candidate.maxBudget);
-      const budgetScore =
-        candidateMaxBudget !== null && propertyPrice !== null && propertyPrice <= candidateMaxBudget
-          ? 20
-          : 0;
-
-      const matchingScore = locationScore + pincodeScore + budgetScore;
+      const matchingScore = 30 + locationScore + budgetScore; // 30 = pincode gate, guaranteed here
       if (matchingScore < 70) {
         continue;
       }
 
       matches.push({
         inquiryId: candidate.id,
+        inquiryType: oppositeType,
         customerId: candidate.customerId,
         customerName: candidate.customer.name,
         customerMobile: candidate.customer.mobile,
-        preferredCity: candidate.preferredCity,
-        preferredPincode: candidate.preferredPincode,
-        maxBudget: candidateMaxBudget,
+        propertyId: candidate.propertyId,
+        city: candidate.city,
+        state: candidate.state,
+        pincode: candidate.pincode,
+        locality: candidate.locality,
+        maxBudget: toNullableNumber(candidate.maxBudget),
         matchingScore,
       });
     }
@@ -535,14 +738,87 @@ export class InquiriesService {
       throw new InquiryNotFoundException();
     }
 
+    // Phase 18A Requirement 4: assignedFrom/assignedTo display names via a
+    // relation select — one query regardless of history length, same
+    // N+1-safe pattern as InquiriesService.list()'s handledBy/assignedTo
+    // (Phase 14A). select (not include-all) keeps passwordHash and
+    // everything else off the wire at the query layer.
     const rows = await this.prisma.inquiryAssignment.findMany({
       where: { inquiryId: id },
       orderBy: { assignedAt: 'desc' },
+      include: {
+        assignedFrom: { select: { id: true, name: true } },
+        assignedTo: { select: { id: true, name: true } },
+      },
     });
 
     return rows.map(toPublicAssignment);
   }
 
+  /**
+   * DELETE /inquiries/{id} (Phase 18A Part 5). ADMIN-only, enforced at
+   * the controller (@Roles('ADMIN') overriding the class-level
+   * @Roles('ADMIN','EMPLOYEE') — RolesGuard's getAllAndOverride already
+   * supports this), not repeated here.
+   *
+   * Relationships inspected before writing this: attachments.inquiry_id,
+   * inquiry_assignments.inquiry_id, and follow_ups.inquiry_id (Phase
+   * 16A) are all ON DELETE CASCADE — so a plain `inquiry.delete()`
+   * already leaves no orphaned rows in any of those three tables, and
+   * follow-ups are removed from the database entirely (not just hidden),
+   * which is what actually guarantees they can never appear in
+   * GET /follow-ups/today afterward.
+   *
+   * The one thing cascade does NOT handle is the R2 objects behind each
+   * attachment row — a raw cascade would silently orphan them in the
+   * bucket. So attachments are removed first, one at a time, through
+   * AttachmentsService.remove() (the exact same path DELETE
+   * /attachments/{id} already uses) — same R2-then-row order, same
+   * StorageNotConfiguredException propagation if R2 isn't configured
+   * (this never reports a successful delete while objects are left
+   * behind, matching AttachmentsService's own existing guarantee). Only
+   * after that does the inquiry row itself get deleted, cascading the
+   * now-empty attachments relation plus assignment history and
+   * follow-ups.
+   */
+  async delete(id: string, actor: Actor): Promise<void> {
+    const existing = await this.prisma.inquiry.findUnique({ where: { id } });
+    if (!existing) {
+      throw new InquiryNotFoundException();
+    }
+
+    const attachments = await this.attachmentsService.list({
+      inquiryId: id,
+    } as ListAttachmentsQueryDto);
+    for (const attachment of attachments) {
+      await this.attachmentsService.remove(attachment.id, actor);
+    }
+
+    await this.prisma.inquiry.delete({ where: { id } });
+
+    await this.auditService.record({
+      userId: actor.userId,
+      entityType: 'INQUIRY',
+      entityId: id,
+      action: 'INQUIRY_DELETED',
+      oldValues: {
+        inquiryNumber: existing.inquiryNumber,
+        customerId: existing.customerId,
+        propertyId: existing.propertyId,
+        status: existing.status,
+        assignedToUserId: existing.assignedToUserId,
+      },
+      ipAddress: actor.ipAddress,
+      userAgent: actor.userAgent,
+    });
+  }
+
+  /**
+   * Phase 23A — ADMIN can toggle isPublic on any inquiry; EMPLOYEE only
+   * on an inquiry currently assigned to them (assertCanModifyInquiry,
+   * same rule as update()/assign()). Previously unrestricted beyond the
+   * base ADMIN/EMPLOYEE role check — see Phase 21 gap analysis finding 4.
+   */
   async setPublicVisibility(
     id: string,
     dto: PublicVisibilityDto,
@@ -552,6 +828,8 @@ export class InquiriesService {
     if (!existing) {
       throw new InquiryNotFoundException();
     }
+
+    this.assertCanModifyInquiry(existing, actor);
 
     const updated = await this.prisma.inquiry.update({
       where: { id },
@@ -585,8 +863,10 @@ export class InquiriesService {
     assignedToUserId: string | null;
     remarks: string | null;
     isPublic: boolean;
-    preferredCity: string | null;
-    preferredPincode: string | null;
+    city: string | null;
+    state: string | null;
+    pincode: string | null;
+    locality: string | null;
     maxBudget: unknown;
     submittedAt: Date | null;
     createdAt: Date;
@@ -621,11 +901,46 @@ export class InquiriesService {
     ]);
 
     return {
-      ...toPublicInquiry({ ...inquiry, handledBy, assignedTo }),
+      // customer is already fetched above (for the full nested `customer`
+      // detail field below) — reused here for customerName too, at no
+      // extra query cost.
+      ...toPublicInquiry({ ...inquiry, handledBy, assignedTo, customer }),
       customer: customer ? toInquiryCustomerSummary(customer) : undefined,
       property: property ? toPublicProperty(property) : null,
       attachments: attachments.map(toPublicAttachment),
     };
+  }
+
+  /**
+   * Phase 23A — the single shared ownership rule for every
+   * EMPLOYEE-restricted inquiry-modification action: edit (update()),
+   * assign/reassign (assign()), and the isPublic toggle
+   * (setPublicVisibility()). ADMIN can modify any inquiry; EMPLOYEE only
+   * the inquiry currently assigned to them, determined from the live
+   * assignedToUserId column — never assignment history, never a cached
+   * client value — so this is automatically correct immediately after a
+   * reassignment: the previous assignee loses access and the new one
+   * gains it the moment assignedToUserId changes, with no separate
+   * bookkeeping needed. An unassigned inquiry (assignedToUserId=null) is
+   * therefore also not modifiable by an EMPLOYEE through any of these
+   * three actions, since null never equals a real actor.userId.
+   *
+   * Extracted from update()'s pre-existing Phase 18A check rather than
+   * duplicating the same condition three times — this codebase already
+   * has multiple small private assert*() helpers per service (see
+   * assertCustomer/assertProperty below), so a fourth one here matches
+   * established style; nothing is shared across service/module
+   * boundaries (FollowUpsService has its own, separate helper for the
+   * identical rule applied to follow-ups — no cross-module authorization
+   * utility exists anywhere in this codebase, so none is introduced here).
+   */
+  private assertCanModifyInquiry(
+    existing: { assignedToUserId: string | null },
+    actor: Actor,
+  ): void {
+    if (actor.role === 'EMPLOYEE' && existing.assignedToUserId !== actor.userId) {
+      throw new ForbiddenRoleException('You can only modify inquiries currently assigned to you.');
+    }
   }
 
   private async assertCustomer(customerId: string): Promise<void> {
@@ -635,11 +950,18 @@ export class InquiriesService {
     }
   }
 
-  private async assertProperty(propertyId: string): Promise<void> {
+  /**
+   * Returns the property's location fields (this phase) rather than
+   * void — create()/update() need them immediately after for the
+   * SELLER location-sync rule, at no extra query cost (this lookup was
+   * already happening for the existence check).
+   */
+  private async assertProperty(propertyId: string): Promise<PropertyLocationSnapshot> {
     const property = await this.prisma.property.findUnique({ where: { id: propertyId } });
     if (!property) {
       throw new PropertyNotFoundException();
     }
+    return property;
   }
 
   private async assertApplicationUser(userId: string): Promise<void> {
@@ -649,6 +971,49 @@ export class InquiriesService {
         'handledByUserId must reference an existing APPLICATION_USER.',
       );
     }
+  }
+
+  /**
+   * ADMIN-only, by design (this phase's Requirement 3) — the literal
+   * requirement is "application notification when admin assigns inquiry
+   * to employee", and the same section explicitly protects
+   * employee-to-employee assignment as existing, unrestricted business
+   * behavior. Gating strictly on actor.role === 'ADMIN' satisfies both:
+   * an EMPLOYEE assigning/reassigning (self-service handoff, already
+   * supported before this phase) never creates a notification, but is
+   * never blocked or altered either — this call is purely an additive
+   * side effect, never a precondition. Never notifies the actor about
+   * their own action (an ADMIN can't self-assign into this path in a way
+   * that would target themselves, since assignedToUserId here always
+   * comes from the request, not defaulted to the actor).
+   *
+   * Fire-and-forget is deliberately not used — notification creation is
+   * awaited like every other side effect in this service (audit, etc.),
+   * so a failure here surfaces rather than silently disappearing. It is
+   * NOT wrapped in the same $transaction as the assignment write: a
+   * notification is a best-effort, additive side effect of a successful
+   * assignment, not a correctness requirement of it — the assignment
+   * itself must never fail or roll back because notification creation
+   * had a problem.
+   */
+  private async notifyInquiryAssigned(
+    actor: Actor,
+    inquiryId: string,
+    inquiryNumber: string,
+    assignedToUserId: string,
+  ): Promise<void> {
+    if (actor.role !== 'ADMIN') {
+      return;
+    }
+
+    await this.notificationsService.create({
+      userId: assignedToUserId,
+      type: 'INQUIRY_ASSIGNED',
+      title: 'New inquiry assigned',
+      message: `You have been assigned inquiry ${inquiryNumber}.`,
+      entityType: 'INQUIRY',
+      entityId: inquiryId,
+    });
   }
 
   private async assertAssignableUser(userId: string): Promise<void> {

@@ -5,6 +5,7 @@ import {
   InquiryAlreadySubmittedException,
   InquiryRecordingRequiredException,
 } from '../common/exceptions/app.exception';
+import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { InquiriesService } from './inquiries.service';
 
@@ -43,6 +44,7 @@ describe('InquiriesService.submit (critical paths)', () => {
         { provide: PrismaService, useValue: prisma },
         { provide: AuditService, useValue: audit },
         { provide: AttachmentsService, useValue: attachments },
+        { provide: NotificationsService, useValue: { create: jest.fn() } },
       ],
     }).compile();
 
@@ -134,5 +136,123 @@ describe('InquiriesService.submit (critical paths)', () => {
     expect(audit.record).toHaveBeenCalledWith(
       expect.objectContaining({ action: 'INQUIRY_SUBMITTED' }),
     );
+  });
+});
+
+describe('InquiriesService.list (customerName)', () => {
+  let service: InquiriesService;
+  let prisma: {
+    inquiry: { findMany: jest.Mock; count: jest.Mock };
+  };
+
+  beforeEach(async () => {
+    prisma = {
+      inquiry: { findMany: jest.fn().mockResolvedValue([]), count: jest.fn().mockResolvedValue(0) },
+    };
+
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        InquiriesService,
+        { provide: PrismaService, useValue: prisma },
+        { provide: AuditService, useValue: { record: jest.fn() } },
+        { provide: AttachmentsService, useValue: {} },
+        { provide: NotificationsService, useValue: {} },
+      ],
+    }).compile();
+
+    service = module.get(InquiriesService);
+  });
+
+  // Requirement: "Do NOT create an N+1 query solution" — the customer
+  // relation must come from the same single findMany call as
+  // handledBy/assignedTo, not a separate query per row or per page.
+  it('fetches customer via the same single findMany include as handledBy/assignedTo (not N+1)', async () => {
+    await service.list({});
+
+    expect(prisma.inquiry.findMany).toHaveBeenCalledTimes(1);
+    expect(prisma.inquiry.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        include: expect.objectContaining({
+          customer: { select: { name: true } },
+          handledBy: { select: { id: true, name: true } },
+          assignedTo: { select: { id: true, name: true } },
+        }),
+      }),
+    );
+  });
+
+  it('returns customerName for an inquiry with a linked customer', async () => {
+    prisma.inquiry.findMany.mockResolvedValue([
+      {
+        id: 'inq-1',
+        inquiryNumber: 'INQ-001',
+        customerId: 'cust-1',
+        customer: { name: 'Mangesh Salve' },
+        propertyId: null,
+        type: null,
+        priority: 'MEDIUM',
+        status: 'NEW',
+        externalReference: null,
+        handledByUserId: null,
+        handledBy: null,
+        assignedToUserId: null,
+        assignedTo: null,
+        remarks: null,
+        isPublic: false,
+        city: null,
+        state: null,
+        pincode: null,
+        locality: null,
+        maxBudget: null,
+        submittedAt: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
+    ]);
+    prisma.inquiry.count.mockResolvedValue(1);
+
+    const result = await service.list({});
+
+    expect(result.data[0].customerId).toBe('cust-1');
+    expect(result.data[0].customerName).toBe('Mangesh Salve');
+  });
+
+  it('returns customerName: null for a lightweight inquiry with no linked customer — existing list behavior otherwise unchanged', async () => {
+    prisma.inquiry.findMany.mockResolvedValue([
+      {
+        id: 'inq-2',
+        inquiryNumber: 'INQ-002',
+        customerId: null,
+        customer: null,
+        propertyId: null,
+        type: null,
+        priority: 'MEDIUM',
+        status: 'NEW',
+        externalReference: null,
+        handledByUserId: null,
+        handledBy: null,
+        assignedToUserId: null,
+        assignedTo: null,
+        remarks: null,
+        isPublic: false,
+        city: null,
+        state: null,
+        pincode: null,
+        locality: null,
+        maxBudget: null,
+        submittedAt: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
+    ]);
+    prisma.inquiry.count.mockResolvedValue(1);
+
+    const result = await service.list({});
+
+    expect(result.data[0].customerId).toBeNull();
+    expect(result.data[0].customerName).toBeNull();
+    // Existing fields still present/correct alongside the new one.
+    expect(result.data[0].inquiryNumber).toBe('INQ-002');
+    expect(result.pagination).toEqual({ page: 1, pageSize: 20, total: 1, totalPages: 1 });
   });
 });

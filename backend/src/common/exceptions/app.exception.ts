@@ -39,8 +39,8 @@ export class MasterAccessRequiredException extends AppException {
 }
 
 export class ForbiddenRoleException extends AppException {
-  constructor() {
-    super('FORBIDDEN', 'You do not have permission to access this resource.', HttpStatus.FORBIDDEN);
+  constructor(message = 'You do not have permission to access this resource.') {
+    super('FORBIDDEN', message, HttpStatus.FORBIDDEN);
   }
 }
 
@@ -58,6 +58,22 @@ export class CustomerNotFoundException extends AppException {
 
 export class CustomerDuplicateException extends AppException {
   constructor(message = 'A customer with this mobile or email already exists.') {
+    super('CONFLICT', message, HttpStatus.CONFLICT);
+  }
+}
+
+/**
+ * Phase 18A — DELETE /customers/{id}. inquiries.customer_id is
+ * ON DELETE RESTRICT (schema.sql, set since the baseline migration —
+ * predates lightweight inquiries), so Postgres itself already refuses
+ * this at the FK level; CustomersService.delete() catches that (Prisma
+ * P2003) and translates it into this clean domain response rather than
+ * leaking a raw constraint error.
+ */
+export class CustomerHasInquiriesException extends AppException {
+  constructor(
+    message = 'This customer cannot be deleted because one or more inquiries reference them.',
+  ) {
     super('CONFLICT', message, HttpStatus.CONFLICT);
   }
 }
@@ -151,5 +167,17 @@ export class InquiryAlreadySubmittedException extends AppException {
 export class InquiryMatchingInvalidException extends AppException {
   constructor(message: string) {
     super('VALIDATION_ERROR', message, HttpStatus.BAD_REQUEST);
+  }
+}
+
+export class FollowUpNotFoundException extends AppException {
+  constructor() {
+    super('FOLLOW_UP_NOT_FOUND', 'Follow-up not found.', HttpStatus.NOT_FOUND);
+  }
+}
+
+export class NotificationNotFoundException extends AppException {
+  constructor() {
+    super('NOTIFICATION_NOT_FOUND', 'Notification not found.', HttpStatus.NOT_FOUND);
   }
 }

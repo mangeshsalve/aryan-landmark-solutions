@@ -16,7 +16,7 @@ model User {
   userType            UserType            @map("user_type")
   role                ApplicationRole?
   name                String              @db.VarChar(150)
-  email               String?             @db.VarChar(255)
+  email               String?             @unique @db.VarChar(255)
   mobile              String?             @db.VarChar(20)
   alternateMobile     String?             @map("alternate_mobile") @db.VarChar(20)
   address             String?
@@ -42,6 +42,9 @@ model User {
   createdAssignments  InquiryAssignment[] @relation("AssignmentCreatedBy")
   createdProperties   Property[]          @relation("PropertyCreatedBy")
   updatedProperties   Property[]          @relation("PropertyUpdatedBy")
+  createdFollowUps    FollowUp[]          @relation("FollowUpCreatedBy")
+  updatedFollowUps    FollowUp[]          @relation("FollowUpUpdatedBy")
+  notifications       Notification[]
   createdBy           User?               @relation("UserCreatedBy", fields: [createdByUserId], references: [id])
   createdUsers        User[]              @relation("UserCreatedBy")
   updatedBy           User?               @relation("UserUpdatedBy", fields: [updatedByUserId], references: [id])
@@ -59,8 +62,18 @@ model Property {
   propertyType    String           @map("property_type") @db.VarChar(50)
   category        PropertyCategory
   area            Decimal?         @db.Decimal(14, 2)
-  areaUnit        String?          @map("area_unit") @db.VarChar(20)
+  /// Controlled list as of this phase (was free-text VARCHAR — existing
+  /// values normalized by migration, see that migration's header for the
+  /// exact mapping). SQ_FT/ACRE/GUNTHA/HECTARE — an India-relevant set
+  /// covering both small residential/commercial plots and large
+  /// agricultural land.
+  areaUnit        PropertyAreaUnit?  @map("area_unit")
   price           Decimal?         @db.Decimal(18, 2)
+  /// Not client-settable as of this phase — this application is
+  /// India-only, price is always INR; PropertiesService.create() hardcodes
+  /// 'INR' rather than reading it from the request. Column/value kept
+  /// (not dropped) for backward compatibility — every existing row is
+  /// already 'INR' anyway.
   priceUnit       String?          @map("price_unit") @db.VarChar(20)
   gatNoDetails    String?          @map("gat_no_details") @db.VarChar(255)
   description     String?
@@ -108,12 +121,26 @@ model Inquiry {
   assignedToUserId  String?             @map("assigned_to_user_id") @db.Uuid
   remarks           String?
   isPublic          Boolean             @default(false) @map("is_public")
-  /// Buyer-stated preferences for matching (Phase 11) — only meaningful
-  /// when type=BUYER. Deliberately independent of the customer's
-  /// residential address/pincode and of whatever propertyId this inquiry
-  /// happens to reference; see Phase 11 report Part 4.
-  preferredCity     String?             @map("preferred_city") @db.VarChar(100)
-  preferredPincode  String?             @map("preferred_pincode") @db.VarChar(10)
+  /// Unified location fields (this phase) — used by BOTH BUYER and SELLER
+  /// inquiries, replacing the old BUYER-only preferredCity/preferredPincode.
+  /// For BUYER: directly client-editable, the buyer's stated preference.
+  /// For SELLER: authoritatively synced from the linked Property whenever
+  /// propertyId is set/changed (InquiriesService) or whenever the linked
+  /// property's own location fields are edited (PropertiesService
+  /// propagates to every SELLER inquiry referencing it) — never
+  /// independently client-editable while a property is linked, and
+  /// preserved (not cleared) if the property is later deleted. See this
+  /// phase's report for the full sync-rule rationale.
+  city              String?             @db.VarChar(100)
+  state             String?             @db.VarChar(100)
+  pincode           String?             @db.VarChar(10)
+  /// Locality/area text (this phase) — for SELLER, synced from
+  /// Property.locality only (never Property.address — kept null if the
+  /// property has no locality set, per this phase's explicit decision).
+  /// Used as the fuzzy/token-matching signal alongside city; not required
+  /// to be present for a match (locality-less inquiries fall back to the
+  /// city signal alone).
+  locality          String?             @db.VarChar(150)
   /// Maximum price the buyer is willing to pay, directly comparable to
   /// Property.price (same Decimal(18,2) precision, same implicit
   /// currency/unit — see Phase 11 report Part 3 for why no separate
@@ -132,6 +159,7 @@ model Inquiry {
   updatedBy         User?               @relation("InquiryUpdatedBy", fields: [updatedByUserId], references: [id])
   assignments       InquiryAssignment[]
   submittedAt       DateTime?           @map("submitted_at")
+  followUps         FollowUp[]
   @@index([customerId], map: "idx_inquiries_customer")
   @@index([propertyId], map: "idx_inquiries_property")
   @@index([status], map: "idx_inquiries_status")
@@ -140,6 +168,10 @@ model Inquiry {
   @@index([isPublic], map: "idx_inquiries_public")
   @@index([createdAt(sort: Desc)], map: "idx_inquiries_created")
   @@index([type], map: "idx_inquiries_type")
+  /// This phase — pincode is now the mandatory matching gate for both
+  /// directions (was city, via a join through Property, for the SELLER
+  /// side); indexed directly since it's a plain Inquiry column now.
+  @@index([type, pincode], map: "idx_inquiries_type_pincode")
   @@map("inquiries")
 }
 
@@ -195,7 +227,64 @@ model InquiryAssignment {
   @@map("inquiry_assignments")
 }
 
-/// 6. audit_logs
+/// 6. follow_ups — Phase 16A. Explicitly authorized 7th table: CLAUDE.md's
+/// "exactly 6 tables" constraint holds only absent an explicit,
+/// unambiguous instruction to add one, and this phase is exactly that
+/// instruction (dedicated to designing this entity). One inquiry has many
+/// follow-ups; a follow-up always belongs to exactly one inquiry (unlike
+/// attachments, there is no lightweight/ownerless case here — a follow-up
+/// is only ever created against an inquiry that already exists).
+model FollowUp {
+  id               String         @id @default(uuid()) @db.Uuid
+  inquiryId        String         @map("inquiry_id") @db.Uuid
+  /// Single combined date+time instant (TIMESTAMPTZ), not separate date/
+  /// time columns — matches every other date+time field in this schema
+  /// (submittedAt, assignedAt, createdAt...). The old web UI's separate
+  /// Date/Time form fields are a client-side concern; Flutter combines
+  /// them into one ISO-8601 value before sending.
+  scheduledAt      DateTime       @map("scheduled_at") @db.Timestamptz(6)
+  status           FollowUpStatus @default(PENDING)
+  notes            String?
+  reminderEnabled  Boolean        @default(false) @map("reminder_enabled")
+  createdAt        DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime       @updatedAt @map("updated_at") @db.Timestamptz(6)
+  createdByUserId  String         @map("created_by") @db.Uuid
+  updatedByUserId  String?        @map("updated_by") @db.Uuid
+  inquiry          Inquiry        @relation(fields: [inquiryId], references: [id], onDelete: Cascade)
+  createdBy        User           @relation("FollowUpCreatedBy", fields: [createdByUserId], references: [id])
+  updatedBy        User?          @relation("FollowUpUpdatedBy", fields: [updatedByUserId], references: [id])
+
+  @@index([inquiryId], map: "idx_follow_ups_inquiry")
+  @@index([scheduledAt], map: "idx_follow_ups_scheduled")
+  @@map("follow_ups")
+}
+
+/// 7. notifications — in-app notifications (this phase). 8th table,
+/// same explicit-instruction carve-out as follow_ups (Phase 16A) from
+/// CLAUDE.md's "exactly 6 tables" constraint. Generic on purpose — same
+/// entityType/entityId + free-text `type` shape as audit_logs, since this
+/// is the same kind of system-generated event record, just recipient-
+/// scoped and user-facing instead of an admin trail. Started with exactly
+/// one producer (ADMIN inquiry assignment) but not hardcoded to it, so a
+/// second notification type later doesn't need a redesign.
+model Notification {
+  id         String    @id @default(uuid()) @db.Uuid
+  userId     String    @map("user_id") @db.Uuid
+  type       String    @db.VarChar(50)
+  title      String    @db.VarChar(255)
+  message    String
+  entityType String?   @map("entity_type") @db.VarChar(100)
+  entityId   String?   @map("entity_id") @db.Uuid
+  isRead     Boolean   @default(false) @map("is_read")
+  readAt     DateTime? @map("read_at") @db.Timestamptz(6)
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isRead, createdAt(sort: Desc)], map: "idx_notifications_user")
+  @@map("notifications")
+}
+
+/// 8. audit_logs
 model AuditLog {
   id         String   @id @default(uuid()) @db.Uuid
   userId     String?  @map("user_id") @db.Uuid
@@ -255,6 +344,25 @@ enum PropertyStatus {
   @@map("property_status")
 }
 
+/// Controlled list for properties.area_unit — SQ_FT/SQ_YD/SQ_M for
+/// residential/commercial-scale listings, ACRE/GUNTHA/HECTARE for
+/// agricultural land (properties.category includes AGRICULTURAL).
+/// Existing free-text data before the phase that introduced this enum was
+/// inconsistent (`SQ.FT`/`sq.ft`/`SQ FT`) — normalized to SQ_FT by that
+/// migration; see its header comment. SQ_YD/SQ_M added later, purely
+/// additive (Postgres `ALTER TYPE ... ADD VALUE`) — see the migration that
+/// added them.
+enum PropertyAreaUnit {
+  SQ_FT
+  SQ_YD
+  SQ_M
+  ACRE
+  GUNTHA
+  HECTARE
+
+  @@map("property_area_unit")
+}
+
 enum AttachmentType {
   PHOTO
   DOCUMENT
@@ -300,4 +408,14 @@ enum InquiryType {
   SELLER
 
   @@map("inquiry_type")
+}
+
+/// Phase 16A — matches the old web UI exactly. Deliberately just these
+/// two: CANCELLED/MISSED/RESCHEDULED/OVERDUE were considered and rejected
+/// per this phase's own instructions (no evidence they're required).
+enum FollowUpStatus {
+  PENDING
+  COMPLETED
+
+  @@map("follow_up_status")
 }

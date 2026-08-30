@@ -23,6 +23,22 @@ describe('CreatePropertyDto validation (critical rules)', () => {
     expect(errors.some((e) => e.property === 'area')).toBe(true);
   });
 
+  it('accepts each controlled areaUnit value', async () => {
+    for (const areaUnit of ['SQ_FT', 'SQ_YD', 'SQ_M', 'ACRE', 'GUNTHA', 'HECTARE']) {
+      const errors = await errorsFor({ propertyType: 'Flat', category: 'RESIDENTIAL', areaUnit });
+      expect(errors).toHaveLength(0);
+    }
+  });
+
+  it('rejects an areaUnit outside the controlled list (e.g. old free-text)', async () => {
+    const errors = await errorsFor({
+      propertyType: 'Flat',
+      category: 'RESIDENTIAL',
+      areaUnit: 'SQ.FT',
+    });
+    expect(errors.some((e) => e.property === 'areaUnit')).toBe(true);
+  });
+
   it('rejects negative price', async () => {
     const errors = await errorsFor({ propertyType: 'Flat', category: 'RESIDENTIAL', price: -100 });
     expect(errors.some((e) => e.property === 'price')).toBe(true);

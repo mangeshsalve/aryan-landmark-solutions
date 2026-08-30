@@ -26,6 +26,8 @@ tags:
   - name: Attachments
   - name: Inquiries
   - name: Inquiry Assignments
+  - name: Follow-ups
+  - name: Notifications
   - name: Public Properties
 
 paths:
@@ -322,6 +324,38 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
+    delete:
+      tags: [Customers]
+      summary: Delete customer
+      description: |
+        Phase 18A. ADMIN only — EMPLOYEE receives 403. Blocked with 409
+        if any inquiry references this customer
+        (inquiries.customer_id is ON DELETE RESTRICT at the database
+        level — this is not a new rule, it predates lightweight
+        inquiries). A customer with no inquiries can always be deleted.
+      security:
+        - applicationBearer: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Customer deleted
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: One or more inquiries reference this customer
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /properties:
     get:
       tags: [Properties]
@@ -410,6 +444,30 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/PropertyResponse'
+
+    delete:
+      tags: [Properties]
+      summary: Delete property
+      description: |
+        Phase 18A. ADMIN only — EMPLOYEE receives 403. Never blocked by
+        inquiries: inquiries.property_id is ON DELETE SET NULL at the
+        database level (predates this phase), so any inquiry referencing
+        this property simply loses that link and falls back to the same
+        "no property yet" state a lightweight inquiry (Phase 13B) starts
+        in — nothing breaks. Property-linked attachments are removed
+        first, individually (including their R2 objects), through the
+        same path DELETE /attachments/{attachmentId} uses.
+      security:
+        - applicationBearer: []
+      parameters:
+        - $ref: '#/components/parameters/PropertyId'
+      responses:
+        '204':
+          description: Property deleted
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
 
   /attachments/upload-url:
     post:
@@ -637,6 +695,21 @@ paths:
     patch:
       tags: [Inquiries]
       summary: Update inquiry
+      description: |
+        Phase 18A authorization: ADMIN may edit any inquiry. EMPLOYEE may
+        edit only the inquiry currently assigned to them
+        (inquiries.assigned_to_user_id = the caller's user id, checked
+        live — never from assignment history), and is rejected with 403
+        otherwise. Viewing (GET) is unaffected — this restriction applies
+        to PATCH only.
+
+        Reassigning via this endpoint (assignedToUserId different from
+        the current value) also sets handledByUserId to the same user,
+        records an inquiry_assignments history row, and — if the caller
+        is an ADMIN — creates an in-app notification for the newly
+        assigned employee, same as POST /inquiries/{inquiryId}/assign.
+        Outside of a reassignment, handledByUserId may still be set
+        independently.
       security:
         - applicationBearer: []
       parameters:
@@ -654,6 +727,38 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/InquiryDetailResponse'
+        '403':
+          description: EMPLOYEE attempted to edit an inquiry not currently assigned to them
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      tags: [Inquiries]
+      summary: Delete inquiry
+      description: |
+        Phase 18A. ADMIN only — EMPLOYEE receives 403. Deletes the
+        inquiry and, via ON DELETE CASCADE, its attachments, assignment
+        history, and follow-ups. Attachment R2 objects are removed
+        first, individually, through the same path DELETE
+        /attachments/{attachmentId} uses, so no object is left behind in
+        storage. A deleted inquiry's follow-ups are removed from the
+        database entirely — they can never appear in
+        GET /follow-ups/today afterward.
+      security:
+        - applicationBearer: []
+      parameters:
+        - $ref: '#/components/parameters/InquiryId'
+      responses:
+        '204':
+          description: Inquiry deleted
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
 
   /inquiries/{inquiryId}/submit:
     post:
@@ -701,8 +806,24 @@ paths:
       tags: [Inquiry Assignments]
       summary: Assign or reassign inquiry
       description: |
-        Updates inquiries.assigned_to_user_id and inserts an
-        inquiry_assignments history row in one database transaction.
+        Updates inquiries.assigned_to_user_id AND
+        inquiries.handled_by_user_id (Phase 18A — both point at the
+        newly assigned user), and inserts an inquiry_assignments history
+        row, in one database transaction.
+
+        Phase 23A authorization: ADMIN may assign/reassign any inquiry.
+        EMPLOYEE may assign/reassign only the inquiry currently assigned
+        to them (inquiries.assigned_to_user_id = the caller's user id,
+        checked live — never from assignment history), and is rejected
+        with 403 otherwise — same rule as PATCH /inquiries/{inquiryId}.
+        An unassigned inquiry (assigned_to_user_id = null) is therefore
+        also not takeable by an EMPLOYEE through this endpoint.
+
+        If the caller is an ADMIN, the newly assigned employee receives
+        an in-app notification (GET /notifications). If the caller is an
+        EMPLOYEE, no notification is created — the assignment itself
+        still succeeds identically either way; this is purely an
+        additive side effect, never a precondition.
       security:
         - applicationBearer: []
       parameters:
@@ -720,6 +841,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/InquiryDetailResponse'
+        '403':
+          description: EMPLOYEE attempted to assign/reassign an inquiry not currently assigned to them
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 
   /inquiries/{inquiryId}/assignments:
     get:
@@ -740,21 +867,69 @@ paths:
   /inquiries/{inquiryId}/matches:
     get:
       tags: [Inquiries]
-      summary: Find matching buyer inquiries for a seller inquiry
+      summary: Find matching inquiries (bidirectional)
       description: |
-        Phase 11 buyer/property matching foundation. The path inquiry
-        must have type=SELLER and an associated property; matches are
-        BUYER inquiries scored against that property:
+        Phase 11 buyer/property matching foundation; bidirectional as of
+        Phase 19A; unified Inquiry.city/state/pincode/locality (replacing
+        the old BUYER-only preferredCity/preferredPincode) as of this
+        phase, with normalized city matching and fuzzy locality matching
+        (city is NOT fuzzy — see the criteria breakdown below). Which
+        direction runs depends on the path inquiry's own type:
 
-          location (50%): candidate.preferredCity equals property.city
-          (case-insensitive)
-          pincode (30%): candidate.preferredPincode equals
-          property.pincode (exact match)
-          budget (20%): property.price <= candidate.maxBudget
+        - type=SELLER → returns matching BUYER inquiries.
+        - type=BUYER → returns matching SELLER inquiries.
+        - any other type (including a lightweight inquiry with type=null)
+          → 400.
+
+        Both directions now score identically and symmetrically — both
+        sides read city/state/pincode/locality directly from their own
+        Inquiry row (a SELLER inquiry's location is kept in sync with its
+        linked Property; see the Inquiry schema description). Only
+        price/budget stays asymmetric: a SELLER's price always comes from
+        its linked Property, a BUYER's from its own maxBudget.
+
+          pincode  (30%): MANDATORY exact match after normalization
+                          (trimmed). No match ⇒ zero results — this is a
+                          hard gate, not merely a scored criterion.
+          location (50%): MAX(cityScore, localityScore) — not summed.
+                          - city: normalized (trimmed, lowercased,
+                            punctuation-stripped) exact compare, not raw
+                            string equality.
+                          - locality: token-overlap fuzzy match on the
+                            same normalization, with short/numeric/generic
+                            words (road, colony, highway, ...) filtered
+                            out so they alone can't drive a false-positive
+                            match.
+          budget   (20%): the SELLER side's property price <= the BUYER
+                          side's maxBudget. Unchanged this phase.
 
         Only candidates scoring 70 or higher are returned, sorted by
-        matchingScore descending. Seller → buyer matching only; the
-        reverse (buyer → seller) direction is not implemented.
+        matchingScore descending. The source inquiry never appears in its
+        own results.
+
+        Achievable score values (documentation only — a mathematical
+        consequence of the weights above, not a separate rule, and the
+        70 threshold itself is unchanged): pincode is all-or-nothing to
+        even reach scoring (30 once gated), location is 0 or 50, budget
+        is 0 or 20 — so a gated candidate can only ever total 30, 50, 80,
+        or 100. Since 80 is the smallest of those that clears 70, the
+        *effective* minimum passing score today is 80 (pincode plus
+        budget alone, at 50, is never enough — the location criterion
+        must also match).
+
+        Status is NOT checked — a NEW, IN_PROGRESS, or COMPLETED inquiry
+        may all use matching; COMPLETED was never actually required by
+        this endpoint.
+
+        Insufficient data: a SELLER inquiry with no propertyId is a 400
+        (there is no price to match against). Any source with no pincode
+        yet returns an empty array, not an error — the field may simply
+        not be filled in. No fabricated matches are ever returned.
+
+        Limitation: property area/category/propertyType are NOT used as
+        matching criteria — there is no corresponding "desired
+        area/category/propertyType" field on a BUYER inquiry to compare
+        against, and none was added in this phase.
       security:
         - applicationBearer: []
       parameters:
@@ -788,6 +963,205 @@ paths:
       responses:
         '200':
           description: Updated inquiry
+
+  /inquiries/{inquiryId}/follow-ups:
+    get:
+      tags: [Follow-ups]
+      summary: List follow-ups for an inquiry
+      description: |
+        Phase 16A. Chronological (scheduledAt ascending) — matches the
+        Inquiry Details screen's Follow-ups section.
+      security:
+        - applicationBearer: []
+      parameters:
+        - $ref: '#/components/parameters/InquiryId'
+      responses:
+        '200':
+          description: Follow-ups for this inquiry
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FollowUpListResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    post:
+      tags: [Follow-ups]
+      summary: Create a follow-up for an inquiry
+      description: |
+        Phase 16A. Works for a lightweight inquiry (customerId=null,
+        propertyId=null, type=null) exactly the same as a fully completed
+        one — a follow-up only ever requires the inquiry to exist.
+      security:
+        - applicationBearer: []
+      parameters:
+        - $ref: '#/components/parameters/InquiryId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateFollowUpRequest'
+      responses:
+        '201':
+          description: Follow-up created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FollowUpResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /inquiries/{inquiryId}/follow-ups/{followUpId}:
+    patch:
+      tags: [Follow-ups]
+      summary: Update a follow-up, incl. completing it
+      description: |
+        Phase 16A. All fields optional. Setting status=COMPLETED is how a
+        follow-up is marked complete — there is no separate "complete"
+        endpoint, since (unlike inquiry submission) there is no extra
+        precondition to enforce.
+      security:
+        - applicationBearer: []
+      parameters:
+        - $ref: '#/components/parameters/InquiryId'
+        - $ref: '#/components/parameters/FollowUpId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateFollowUpRequest'
+      responses:
+        '200':
+          description: Follow-up updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FollowUpResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      tags: [Follow-ups]
+      summary: Delete a follow-up
+      description: |
+        Phase 22B. ADMIN and EMPLOYEE both allowed — same authorization as
+        create/update above (no per-assignment ownership restriction).
+        Hard delete: the follow_ups row is permanently removed. Before
+        deletion, an audit_logs entry is written recording who deleted it,
+        when, and a snapshot of the deleted follow-up's data (id,
+        inquiryId, scheduledAt, status, notes, reminderEnabled) — both
+        writes happen inside a single database transaction, so a follow-up
+        is never deleted without its audit record, and an audit record
+        never claims a deletion that didn't happen.
+
+        followUpId must belong to the inquiry named in the path — a
+        followUpId that exists but under a different inquiryId returns
+        404, identical to a followUpId that doesn't exist at all.
+      security:
+        - applicationBearer: []
+      parameters:
+        - $ref: '#/components/parameters/InquiryId'
+        - $ref: '#/components/parameters/FollowUpId'
+      responses:
+        '204':
+          description: Follow-up deleted
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /follow-ups/today:
+    get:
+      tags: [Follow-ups]
+      summary: Today's follow-ups (dashboard)
+      description: |
+        Phase 16A Part 6. "Today" is computed in the business's IST
+        (Asia/Kolkata, UTC+5:30) timezone as a real UTC instant range, not
+        a string comparison — see the backend's today-range.util.ts for
+        the flagged assumption (no documented business timezone exists
+        elsewhere in this project). Not paginated — "today" is a small,
+        naturally bounded set. Each entry embeds a minimal Inquiry
+        summary (id, inquiryNumber, status) and a minimal customer
+        summary (id, name) which is null for a lightweight inquiry that
+        has no customer yet.
+      security:
+        - applicationBearer: []
+      parameters:
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/FollowUpStatus'
+      responses:
+        '200':
+          description: Follow-ups scheduled for today
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TodayFollowUpListResponse'
+
+  /notifications:
+    get:
+      tags: [Notifications]
+      summary: List the caller's own notifications
+      description: |
+        Always scoped to the authenticated caller — there is no way to
+        list another user's notifications. No POST: notifications are
+        always created as a side effect of a real business action (e.g.
+        an ADMIN assigning an inquiry), never directly by a client.
+      security:
+        - applicationBearer: []
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - name: isRead
+          in: query
+          description: Filter to only read (true) or only unread (false) notifications.
+          schema:
+            type: boolean
+      responses:
+        '200':
+          description: Notifications
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationListResponse'
+
+  /notifications/{id}:
+    patch:
+      tags: [Notifications]
+      summary: Update a notification (mark read/unread)
+      description: |
+        Scoped to the caller's own notifications — a notification id
+        belonging to another user returns 404, never leaking whether it
+        exists.
+      security:
+        - applicationBearer: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateNotificationRequest'
+      responses:
+        '200':
+          description: Notification updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
 
   /public/properties:
     get:
@@ -871,6 +1245,14 @@ components:
         type: string
         format: uuid
 
+    FollowUpId:
+      name: followUpId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
   responses:
     ValidationError:
       description: Validation error
@@ -940,6 +1322,23 @@ components:
         - SOLD
         - ON_HOLD
         - INACTIVE
+
+    PropertyAreaUnit:
+      type: string
+      description: |
+        Controlled list — was free-text before, with inconsistent
+        real-world values ('SQ.FT'/'sq.ft'/'SQ FT'), now normalized.
+        SQ_FT/SQ_YD/SQ_M for residential/commercial-scale listings;
+        ACRE/GUNTHA/HECTARE for agricultural land. SQ_YD/SQ_M added later
+        as a purely additive change (Postgres ALTER TYPE ... ADD VALUE),
+        matching Flutter's six-value area-unit picker.
+      enum:
+        - SQ_FT
+        - SQ_YD
+        - SQ_M
+        - ACRE
+        - GUNTHA
+        - HECTARE
 
     InquiryStatus:
       type: string
@@ -1258,6 +1657,13 @@ components:
     CreatePropertyRequest:
       type: object
       required: [propertyType, category]
+      description: |
+        priceUnit is not part of this request (this phase) — this
+        application is India-only, price is always INR, applied
+        server-side; it is not client-settable. mapUrl accepts any valid
+        URL (e.g. a Google Maps shareable location link produced by
+        Flutter's own map picker) — no Google Maps API integration or key
+        exists or is required on the backend for this.
       properties:
         propertyCode:
           type: string
@@ -1269,12 +1675,10 @@ components:
           type: number
           minimum: 0
         areaUnit:
-          type: string
+          $ref: '#/components/schemas/PropertyAreaUnit'
         price:
           type: number
           minimum: 0
-        priceUnit:
-          type: string
         gatNoDetails:
           type: string
         description:
@@ -1300,6 +1704,10 @@ components:
         mapUrl:
           type: string
           format: uri
+          description: |
+            A shareable location URL (e.g. from Google Maps) selected via
+            Flutter's own map picker. Validated as a well-formed URL only
+            — not verified against any Maps API.
 
     UpdatePropertyRequest:
       allOf:
@@ -1332,7 +1740,8 @@ components:
           type: number
           nullable: true
         areaUnit:
-          type: string
+          allOf:
+            - $ref: '#/components/schemas/PropertyAreaUnit'
           nullable: true
         price:
           type: number
@@ -1340,6 +1749,13 @@ components:
         priceUnit:
           type: string
           nullable: true
+          description: |
+            Always "INR" in practice (this application is India-only) —
+            not client-settable via CreatePropertyRequest/
+            UpdatePropertyRequest (this phase). Kept in the response for
+            backward compatibility with existing clients reading it; the
+            database column and value are both retained, only the
+            request contract changed.
         gatNoDetails:
           type: string
           nullable: true
@@ -1619,12 +2035,24 @@ components:
           nullable: true
         remarks:
           type: string
-        preferredCity:
+        city:
           type: string
-          description: BUYER matching preference — the city the buyer wants to purchase in.
-        preferredPincode:
+          description: |
+            Unified location field (this phase), used by both BUYER and SELLER.
+            For a SELLER inquiry with propertyId set, ignored and overridden by
+            the linked property's own city.
+        state:
           type: string
-          description: BUYER matching preference — the exact pincode the buyer wants to purchase in.
+          description: Unified location field (this phase). Same SELLER-sync override rule as city.
+        pincode:
+          type: string
+          description: Unified location field (this phase). Same SELLER-sync override rule as city.
+        locality:
+          type: string
+          description: |
+            Locality/area text (this phase) — the fuzzy-matching signal alongside
+            city. Same SELLER-sync override rule as city (synced from
+            Property.locality, never Property.address).
         maxBudget:
           type: number
           minimum: 0
@@ -1655,12 +2083,23 @@ components:
           format: uuid
         remarks:
           type: string
-        preferredCity:
+        city:
           type: string
-          description: BUYER matching preference — the city the buyer wants to purchase in.
-        preferredPincode:
+          description: |
+            Unified location field (this phase), used by both BUYER and SELLER.
+            For a SELLER inquiry, ignored/overridden whenever propertyId changes
+            in the same request.
+        state:
           type: string
-          description: BUYER matching preference — the exact pincode the buyer wants to purchase in.
+          description: Unified location field (this phase). Same SELLER-sync override rule as city.
+        pincode:
+          type: string
+          description: Unified location field (this phase). Same SELLER-sync override rule as city.
+        locality:
+          type: string
+          description: |
+            Locality/area text (this phase) — the fuzzy-matching signal alongside
+            city. Same SELLER-sync override rule as city.
         maxBudget:
           type: number
           minimum: 0
@@ -1685,7 +2124,7 @@ components:
 
     Inquiry:
       type: object
-      required: [id, inquiryNumber, customerId, priority, status, isPublic]
+      required: [id, inquiryNumber, customerId, customerName, priority, status, isPublic]
       properties:
         id:
           type: string
@@ -1699,6 +2138,15 @@ components:
           description: |
             NULL for a lightweight inquiry (Phase 13B) until an EMPLOYEE
             sets it via PATCH /inquiries/{inquiryId}.
+        customerName:
+          type: string
+          nullable: true
+          description: |
+            This phase — the linked customer's display name, straight
+            from GET /inquiries (no extra GET /customers/{id} request
+            needed). Null exactly when customerId is null. Fetched via
+            the same single relation-include as handledBy/assignedTo, so
+            listing a page of inquiries costs one query, not one per row.
         propertyId:
           type: string
           format: uuid
@@ -1743,14 +2191,33 @@ components:
           nullable: true
         isPublic:
           type: boolean
-        preferredCity:
+        city:
           type: string
           nullable: true
-          description: BUYER matching preference — the city the buyer wants to purchase in.
-        preferredPincode:
+          description: |
+            Unified location field (this phase, replacing the old BUYER-only
+            preferredCity), used by both BUYER and SELLER. For a SELLER
+            inquiry, kept in sync with the linked property's own city — see
+            InquiriesService/PropertiesService for the sync rule; never
+            independently editable while a property is linked.
+        state:
           type: string
           nullable: true
-          description: BUYER matching preference — the exact pincode the buyer wants to purchase in.
+          description: Unified location field (this phase). Same SELLER-sync rule as city.
+        pincode:
+          type: string
+          nullable: true
+          description: |
+            Unified location field (this phase, replacing the old BUYER-only
+            preferredPincode). Mandatory exact-match gate for matching — see
+            GET /inquiries/{inquiryId}/matches.
+        locality:
+          type: string
+          nullable: true
+          description: |
+            Locality/area text (this phase) — the fuzzy-matching signal
+            alongside city. For a SELLER inquiry, synced from
+            Property.locality only (never Property.address).
         maxBudget:
           type: number
           nullable: true
@@ -1805,7 +2272,14 @@ components:
 
     Assignment:
       type: object
-      required: [id, inquiryId, assignedToUserId, assignedAt]
+      description: |
+        Phase 18A: assignedFrom/assignedTo added alongside the existing
+        *UserId fields (kept for backward compatibility) — minimal
+        {id, name} display identity, same UserSummary shape used
+        elsewhere (e.g. Inquiry.handledBy/assignedTo). assignedFrom is
+        null for the first-ever assignment of an inquiry (nothing to
+        reassign from).
+      required: [id, inquiryId, assignedToUserId, assignedTo, assignedAt]
       properties:
         id:
           type: string
@@ -1817,9 +2291,15 @@ components:
           type: string
           format: uuid
           nullable: true
+        assignedFrom:
+          allOf:
+            - $ref: '#/components/schemas/UserSummary'
+          nullable: true
         assignedToUserId:
           type: string
           format: uuid
+        assignedTo:
+          $ref: '#/components/schemas/UserSummary'
         assignedAt:
           type: string
           format: date-time
@@ -1844,14 +2324,33 @@ components:
     InquiryMatch:
       type: object
       description: |
-        A BUYER inquiry that scored at least 70 against the SELLER
-        inquiry's associated property (Phase 11). Weights: location 50%,
-        pincode 30%, budget 20%.
-      required: [inquiryId, customerId, customerName, matchingScore]
+        An opposite-type inquiry that scored at least 70 against the
+        source inquiry (Phase 11; bidirectional as of Phase 19A; unified
+        location fields as of this phase, with normalized city matching
+        and fuzzy locality matching — city is NOT fuzzy). For a SELLER
+        source, entries are matching BUYER inquiries; for a BUYER
+        source, entries are matching SELLER inquiries. Weights: pincode
+        30% (mandatory gate), location (MAX of city-normalized-exact and
+        locality-fuzzy-token, not summed) 50%, budget 20%. Achievable
+        totals are therefore 30/50/80/100 — the 70 threshold is
+        unchanged, but 80 is effectively the minimum passing score (see
+        the matches endpoint description for the full explanation).
+
+        inquiryType/propertyId are additive (Phase 19A). city/state/
+        pincode/locality (this phase, replacing preferredCity/
+        preferredPincode) are populated for BOTH match types now —
+        unlike the old buyer-only fields, these are meaningful regardless
+        of whether the matched entry is BUYER or SELLER, since both sides
+        carry their own location directly on the Inquiry row.
+      required: [inquiryId, inquiryType, customerId, customerName, matchingScore]
       properties:
         inquiryId:
           type: string
           format: uuid
+          description: The matched inquiry's id — use this to navigate to it.
+        inquiryType:
+          $ref: '#/components/schemas/InquiryType'
+          description: Which side this match is (BUYER or SELLER).
         customerId:
           type: string
           format: uuid
@@ -1860,15 +2359,34 @@ components:
         customerMobile:
           type: string
           nullable: true
-        preferredCity:
+        propertyId:
+          type: string
+          format: uuid
+          nullable: true
+          description: |
+            The matched inquiry's property, if any. Populated for
+            inquiryType=SELLER matches (fetch GET /properties/{propertyId}
+            for full detail); null for inquiryType=BUYER matches.
+        city:
           type: string
           nullable: true
-        preferredPincode:
+          description: Populated for both inquiryType=BUYER and inquiryType=SELLER matches (this phase).
+        state:
           type: string
           nullable: true
+          description: Populated for both inquiryType=BUYER and inquiryType=SELLER matches (this phase).
+        pincode:
+          type: string
+          nullable: true
+          description: Populated for both inquiryType=BUYER and inquiryType=SELLER matches (this phase).
+        locality:
+          type: string
+          nullable: true
+          description: Populated for both inquiryType=BUYER and inquiryType=SELLER matches (this phase).
         maxBudget:
           type: number
           nullable: true
+          description: Null for inquiryType=SELLER matches (a buyer-preference field, unchanged this phase).
         matchingScore:
           type: integer
           minimum: 70
@@ -1886,6 +2404,223 @@ components:
           items:
             $ref: '#/components/schemas/InquiryMatch'
           description: Sorted by matchingScore descending. Only scores >= 70 are included.
+
+    FollowUpStatus:
+      type: string
+      enum: [PENDING, COMPLETED]
+      description: |
+        Phase 16A — matches the old web UI exactly. Deliberately just
+        these two; no CANCELLED/MISSED/RESCHEDULED/OVERDUE.
+
+    CreateFollowUpRequest:
+      type: object
+      required: [scheduledAt]
+      description: |
+        No inquiryId — taken from the URL path. scheduledAt is a single
+        ISO-8601 date-time (the old UI's separate Date/Time fields are
+        combined client-side before sending).
+      properties:
+        scheduledAt:
+          type: string
+          format: date-time
+        status:
+          allOf:
+            - $ref: '#/components/schemas/FollowUpStatus'
+          default: PENDING
+        notes:
+          type: string
+        reminderEnabled:
+          type: boolean
+          default: false
+
+    UpdateFollowUpRequest:
+      type: object
+      description: |
+        Everything from CreateFollowUpRequest, all optional. Setting
+        status=COMPLETED is how a follow-up is completed — no separate
+        endpoint.
+      properties:
+        scheduledAt:
+          type: string
+          format: date-time
+        status:
+          $ref: '#/components/schemas/FollowUpStatus'
+        notes:
+          type: string
+        reminderEnabled:
+          type: boolean
+
+    FollowUp:
+      type: object
+      required:
+        - id
+        - inquiryId
+        - scheduledAt
+        - status
+        - reminderEnabled
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        inquiryId:
+          type: string
+          format: uuid
+        scheduledAt:
+          type: string
+          format: date-time
+        status:
+          $ref: '#/components/schemas/FollowUpStatus'
+        notes:
+          type: string
+          nullable: true
+        reminderEnabled:
+          type: boolean
+          description: |
+            Persisted as business data only (Phase 16A) — no push/email/
+            SMS/local notification is sent when this is true. Flutter
+            reads it to show a reminder indicator.
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    FollowUpResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+        data:
+          $ref: '#/components/schemas/FollowUp'
+
+    FollowUpListResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/FollowUp'
+
+    TodayFollowUp:
+      type: object
+      description: |
+        FollowUp plus a minimal embedded inquiry summary — deliberately
+        not the full Inquiry/User schemas (Phase 16A Part 8). customer is
+        null for a lightweight inquiry that has no customer yet.
+      allOf:
+        - $ref: '#/components/schemas/FollowUp'
+        - type: object
+          required: [inquiry]
+          properties:
+            inquiry:
+              type: object
+              required: [id, inquiryNumber, status, customer]
+              properties:
+                id:
+                  type: string
+                  format: uuid
+                inquiryNumber:
+                  type: string
+                status:
+                  $ref: '#/components/schemas/InquiryStatus'
+                customer:
+                  type: object
+                  nullable: true
+                  required: [id, name]
+                  properties:
+                    id:
+                      type: string
+                      format: uuid
+                    name:
+                      type: string
+
+    TodayFollowUpListResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/TodayFollowUp'
+
+    Notification:
+      type: object
+      description: |
+        In-app notification (this phase). Currently produced only when an
+        ADMIN assigns/reassigns an inquiry to an employee (type=
+        INQUIRY_ASSIGNED) — employee-initiated assignment does not
+        produce one, by design (see POST /inquiries/{inquiryId}/assign).
+        Generic on purpose (same entityType/entityId/free-text-type shape
+        as internal audit events) so a future notification type doesn't
+        need a contract change.
+      required: [id, type, title, message, isRead, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        type:
+          type: string
+          example: INQUIRY_ASSIGNED
+        title:
+          type: string
+        message:
+          type: string
+        entityType:
+          type: string
+          nullable: true
+          example: INQUIRY
+        entityId:
+          type: string
+          format: uuid
+          nullable: true
+          description: With entityType=INQUIRY, the inquiry to navigate to.
+        isRead:
+          type: boolean
+        readAt:
+          type: string
+          format: date-time
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+
+    NotificationListResponse:
+      type: object
+      required: [success, data, pagination]
+      properties:
+        success:
+          type: boolean
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Notification'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+
+    NotificationResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+        data:
+          $ref: '#/components/schemas/Notification'
+
+    UpdateNotificationRequest:
+      type: object
+      description: The only supported change is marking a notification read/unread.
+      properties:
+        isRead:
+          type: boolean
 
     PublicPhoto:
       type: object

@@ -21,3 +21,5 @@ export type DocumentTypeValue = 'SEVEN_TWELVE' | 'SALE_DEED' | 'PROPERTY_CARD' |
 export type InquiryStatusValue = 'NEW' | 'IN_PROGRESS' | 'ON_HOLD' | 'COMPLETED' | 'CANCELLED';
 export type InquiryPriorityValue = 'LOW' | 'MEDIUM' | 'HIGH' | 'URGENT';
 export type InquiryTypeValue = 'BUYER' | 'SELLER';
+export type FollowUpStatusValue = 'PENDING' | 'COMPLETED';
+export type PropertyAreaUnitValue = 'SQ_FT' | 'SQ_YD' | 'SQ_M' | 'ACRE' | 'GUNTHA' | 'HECTARE';

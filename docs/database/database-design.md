@@ -88,6 +88,29 @@ its inquiries is public, and vice versa. Only an ADMIN may change it, via
 sufficient (an ADMIN could mark a SOLD property `is_public` without
 intending it to reappear in the public listing).
 
+`area_unit`: controlled enum (`property_area_unit`) — was free-text
+`VARCHAR(20)` before, with inconsistent real values (`SQ.FT`/`sq.ft`/
+`SQ FT`). Values: `SQ_FT`, `SQ_YD`, `SQ_M`, `ACRE`, `GUNTHA`, `HECTARE` —
+SQ_FT/SQ_YD/SQ_M for residential/commercial-scale listings, the other
+three for agricultural land. Existing rows were normalized (not left
+inconsistent) by the migration that introduced the enum — see that
+migration's header comment for the exact mapping; nothing was silently
+changed, every real value at the time mapped unambiguously to `SQ_FT`.
+`SQ_YD`/`SQ_M` were added later by a separate, purely additive
+`ALTER TYPE ... ADD VALUE` migration (no existing row touched — no
+property had ever held a "Sq Yd"/"Sq M" value, since neither was a valid
+option before that migration), to match Flutter's six-value area-unit
+picker.
+
+`price_unit` (this phase): no longer client-settable. This application
+is India-only — `PropertiesService.create()` now hardcodes `'INR'`
+rather than reading it from the request, and it's absent from
+`UpdatePropertyRequest` entirely (never editable after creation). The
+column and its value are both retained (not dropped) — every existing
+row was already `'INR'`, so no data changed. Not used in any business
+logic or calculation (confirmed before this phase); matching already
+assumed INR on both sides, unconditionally.
+
 ## 3. attachments
 
 This is the single file metadata table.
@@ -153,6 +176,13 @@ before the customer or property has been identified. An EMPLOYEE fills
 these in later via `PATCH /inquiries/{id}` once they've reviewed the
 recording/photos/documents attached to the inquiry.
 
+`customerName` (API response field, this phase, no schema column) —
+`GET /inquiries` embeds the linked customer's display name directly, via
+the same single relation-`select` already used for `handledBy`/
+`assignedTo` (Phase 14A), so a Flutter list screen never needs a
+per-row `GET /customers/{id}` follow-up call. Null exactly when
+`customer_id` is null.
+
 Important fields:
 - inquiry_number
 - customer_id
@@ -165,8 +195,10 @@ Important fields:
 - assigned_to_user_id
 - remarks
 - is_public
-- preferred_city
-- preferred_pincode
+- city
+- state
+- pincode
+- locality
 - max_budget
 - submitted_at
 
@@ -186,38 +218,92 @@ update request body. Once set, it is never cleared by normal updates.
 replaces the prior free-text field. Determines which side of a deal this
 inquiry represents; see "Buyer/property matching" below.
 
-`preferred_city`, `preferred_pincode`, `max_budget` (all nullable, Phase 11)
-— buyer-stated matching preferences, only meaningful when `type = 'BUYER'`.
-Deliberately independent of the customer's own residential
-address/city/pincode (a customer's home address is not assumed to be where
-they want to buy) and of whatever `property_id` this inquiry happens to
-reference. `max_budget` uses the same `NUMERIC(18,2)` precision as
-`properties.price` for direct comparison — no currency/unit conversion is
-implemented; both are assumed to be the same unit (every property in this
-project currently uses `price_unit = 'INR'`).
+`city`, `state`, `pincode`, `locality` (all nullable) — unified location
+fields (this phase), replacing the old BUYER-only `preferred_city`/
+`preferred_pincode` (no `preferred_state`/`preferred_locality` ever
+existed). Used consistently by BOTH `BUYER` and `SELLER` inquiries:
 
-## Buyer/property matching (Phase 11)
+- **BUYER**: directly client-editable, the buyer's stated preference —
+  same as before, just renamed, plus the two new fields.
+- **SELLER**: authoritatively synced from the linked `properties` row
+  whenever `property_id` is set/changed (`InquiriesService`), or
+  whenever the linked property's own location fields are edited
+  (`PropertiesService.update()` propagates to every `SELLER` inquiry
+  referencing it, in the same transaction as the property write) — never
+  independently client-editable while a property is linked. If the
+  property is later deleted, the inquiry's location snapshot is
+  *preserved*, not cleared, even though `property_id` becomes `NULL`
+  (via the existing `ON DELETE SET NULL`).
+- `locality` is synced from `properties.locality` only — never
+  `properties.address`, even when `locality` is empty (left `NULL`
+  rather than falling back to the noisier free-text address field; full
+  address fuzzy matching was explicitly deferred). It's the
+  fuzzy/token-matching signal alongside `city`.
 
-`GET /inquiries/{inquiryId}/matches` — given a `SELLER` inquiry with an
-associated property, finds `BUYER` inquiries that are a good fit for that
-property. Weighted, deterministic scoring, each criterion all-or-nothing
-(no partial credit):
+`max_budget` (nullable) stays BUYER-only, unchanged this phase — same
+`NUMERIC(18,2)` precision as `properties.price` for direct comparison, no
+currency/unit conversion (every property currently uses
+`price_unit = 'INR'`).
 
-- **Location — 50%**: `preferred_city` equals the property's `city`
-  (case-insensitive).
-- **Pincode — 30%**: `preferred_pincode` equals the property's `pincode`
-  (exact string match; no geographic-distance approximation, no address
-  parsing).
-- **Budget — 20%**: the property's `price` is less than or equal to the
-  buyer's `max_budget`.
+## Buyer/property matching (Phase 11; bidirectional as of Phase 19A;
+unified location fields as of this phase, with normalized city matching
+and fuzzy locality matching — city is NOT fuzzy, see below)
 
-`matchingScore = locationScore + pincodeScore + budgetScore` (0-100). Only
-matches with `matchingScore >= 70` are returned, sorted highest first.
-Because `30 + 20 = 50 < 70`, the location criterion is structurally
-required for any match to qualify — a mathematical consequence of the
-weights, not a separately invented rule. Missing data on either side of a
-comparison scores that criterion 0 (never assumed to match). Only the
-seller → buyer direction is implemented.
+`GET /inquiries/{inquiryId}/matches` — direction depends on the path
+inquiry's own `type`:
+
+- `type = SELLER` → finds `BUYER` inquiries that are a good fit.
+- `type = BUYER` → finds `SELLER` inquiries that are a good fit.
+- any other `type` (including `NULL`, a lightweight inquiry) → rejected.
+
+Both directions are now genuinely symmetric — both sides read
+`city`/`state`/`pincode`/`locality` directly from their own `inquiries`
+row (no more "SELLER's location comes from `properties`, BUYER's from
+`inquiries`" special-casing). Only price/budget stays asymmetric by
+design: a SELLER's number always comes from its linked `properties.price`,
+a BUYER's from `inquiries.max_budget` directly.
+
+- **Pincode — 30%, mandatory gate**: exact match after normalization
+  (trimmed at write time). No match ⇒ zero results — a hard
+  precondition, not merely a scored criterion; replaces the old
+  city-based mandatory pre-filter (`idx_inquiries_type_pincode`).
+- **Location — up to 50%** = `MAX(cityScore, localityScore)`, not
+  summed:
+  - **city**: normalized (trimmed, lowercased, punctuation-stripped)
+    exact compare — not raw string equality.
+  - **locality**: token-overlap fuzzy match on the same normalization,
+    with short/numeric/generic words (road, colony, highway, ...)
+    filtered out so they alone can't drive a false-positive match.
+- **Budget — 20%**: unchanged — the SELLER side's `properties.price` is
+  less than or equal to the BUYER side's `inquiries.max_budget`.
+
+`matchingScore = 30 (pincode, guaranteed once gated) + locationScore +
+budgetScore` (0-100). Only matches with `matchingScore >= 70` are
+returned, sorted highest first. Missing data on either side of a
+comparison scores that criterion 0 (never assumed to match). The source
+inquiry never appears in its own results.
+
+**Achievable score values** (documentation only — a mathematical
+consequence of the weights above, not a separate rule; the 70 threshold
+itself is unchanged and is not being revisited here): pincode is
+all-or-nothing to even reach scoring (30 once gated), location is 0 or
+50, budget is 0 or 20 — so a gated candidate can only ever total `30`,
+`50`, `80`, or `100`. There is no way to score, say, 60 or exactly 70.
+Since 80 is the smallest of those four values that clears the `>= 70`
+threshold, the *effective* minimum passing score under the current
+scoring model is **80** — pincode plus budget alone (50) is never
+enough; the location criterion (city or locality) must also match.
+
+`status` is not checked — matching has never required `COMPLETED`.
+Insufficient data: a `SELLER` inquiry with no `property_id` is rejected
+(there is no price to match against); any source with no `pincode` yet
+returns an empty result, not an error.
+
+**Limitation (Phase 19A):** `properties.area`, `properties.category`, and
+`properties.property_type` are not used as matching criteria in either
+direction — `inquiries` has no corresponding "desired area/category/
+property type" field for a buyer to compare against, and none was added
+in this phase (out of scope; would require a schema change).
 
 ## Inquiry submission lifecycle and call recording rule
 
@@ -272,6 +358,33 @@ Examples:
 - PUBLIC_STATUS_CHANGED
 
 `old_values` and `new_values` use JSONB.
+
+## Notifications (this phase)
+
+`notifications` — in-app notifications. No notification system of any
+kind existed before this phase (verified by repository-wide search).
+Generic shape, deliberately mirroring `audit_logs`'
+entity_type/entity_id/free-text-`type` pattern (same kind of
+system-generated event record, just recipient-scoped and user-facing
+instead of an admin trail): `user_id` (recipient), `type`, `title`,
+`message`, `entity_type`/`entity_id` (optional, e.g. `INQUIRY`/the
+inquiry id), `is_read`, `read_at`, `created_at`.
+
+Currently produced only by one event: an ADMIN assigning or reassigning
+an inquiry to an employee (`type = 'INQUIRY_ASSIGNED'`) — see
+`POST /inquiries/{inquiryId}/assign` and the reassignment path of
+`PATCH /inquiries/{inquiryId}`. Gated strictly on the calling actor's
+role being ADMIN: an EMPLOYEE assigning/reassigning an inquiry to another
+employee (an existing, unrestricted business capability) never produces
+a notification, and is never blocked by this feature either — it's a
+purely additive side effect of a successful assignment, not a
+precondition of one.
+
+No POST endpoint exists — notifications are only ever created as a
+side effect of a real business action, never directly by a client, same
+as `audit_logs`. `GET /notifications` and `PATCH /notifications/{id}`
+are both implicitly scoped to the authenticated caller's own
+notifications only.
 
 ## Deletion and consistency
 

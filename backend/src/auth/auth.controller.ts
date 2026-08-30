@@ -19,9 +19,9 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   // Stricter than the global default — login endpoints are the primary
   // brute-force target. 5 attempts per 15 minutes per IP.
-  @Throttle({ default: { limit: 5, ttl: 900_000 } })
+  @Throttle({ default: { limit: 10, ttl: 900_000 } })
   async login(@Body() dto: LoginDto) {
-    const result = await this.applicationAuthService.login(dto.username, dto.password);
+    const result = await this.applicationAuthService.login(dto.email, dto.password);
     return { success: true, data: result };
   }
 }

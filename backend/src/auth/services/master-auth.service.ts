@@ -27,9 +27,9 @@ export class MasterAuthService {
     private readonly tokenService: TokenService,
   ) {}
 
-  async login(username: string, password: string): Promise<MasterLoginResult> {
+  async login(email: string, password: string): Promise<MasterLoginResult> {
     const user = await this.prisma.user.findFirst({
-      where: { userId: username, userType: 'MASTER' },
+      where: { email: { equals: email, mode: 'insensitive' }, userType: 'MASTER' },
     });
 
     if (!user || !user.passwordHash) {

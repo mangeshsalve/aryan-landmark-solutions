@@ -47,20 +47,41 @@ export class CreateInquiryDto {
   externalReference?: string;
 
   @ApiPropertyOptional({
-    description: 'BUYER matching preference — the city the buyer wants to purchase in.',
+    description:
+      'Unified location field (this phase), used by both BUYER and SELLER. For a SELLER ' +
+      "inquiry with propertyId set, this is ignored and overridden by the linked property's " +
+      'own city — see InquiriesService.create() for the sync rule.',
   })
   @IsOptional()
   @IsString()
   @MaxLength(100)
-  preferredCity?: string;
+  city?: string;
 
   @ApiPropertyOptional({
-    description: 'BUYER matching preference — the exact pincode the buyer wants to purchase in.',
+    description: 'Unified location field (this phase). Same SELLER-sync override rule as city.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  state?: string;
+
+  @ApiPropertyOptional({
+    description: 'Unified location field (this phase). Same SELLER-sync override rule as city.',
   })
   @IsOptional()
   @IsString()
   @MaxLength(10)
-  preferredPincode?: string;
+  pincode?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Locality/area text (this phase) — the fuzzy-matching signal alongside city. Same ' +
+      'SELLER-sync override rule as city (synced from Property.locality, never Property.address).',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(150)
+  locality?: string;
 
   @ApiPropertyOptional({
     description: 'BUYER matching preference — maximum price the buyer is willing to pay.',

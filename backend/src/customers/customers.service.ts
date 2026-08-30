@@ -1,6 +1,8 @@
 import { Injectable } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import {
   CustomerDuplicateException,
+  CustomerHasInquiriesException,
   CustomerNotFoundException,
 } from '../common/exceptions/app.exception';
 import { PrismaService } from '../prisma/prisma.service';
@@ -177,6 +179,46 @@ export class CustomersService {
     });
 
     return toPublicCustomer(updated);
+  }
+
+  /**
+   * DELETE /customers/{id} (Phase 18A Part 6). ADMIN-only, enforced at
+   * the controller. inquiries.customer_id is ON DELETE RESTRICT (see
+   * schema.sql/baseline migration — predates lightweight inquiries),
+   * meaning Postgres already refuses to delete a customer referenced by
+   * any inquiry; this catches that specific FK violation (Prisma P2003)
+   * and reports it as a clean CustomerHasInquiriesException instead of a
+   * raw database error. No cascade/orphan risk: a customer has no
+   * attachments or other dependent rows of its own — inquiries.customer_id
+   * is the only foreign key pointing at a CUSTOMER row.
+   */
+  async delete(
+    id: string,
+    actor: { userId: string; ipAddress?: string; userAgent?: string },
+  ): Promise<void> {
+    const existing = await this.prisma.user.findFirst({ where: { id, userType: 'CUSTOMER' } });
+    if (!existing) {
+      throw new CustomerNotFoundException();
+    }
+
+    try {
+      await this.prisma.user.delete({ where: { id } });
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2003') {
+        throw new CustomerHasInquiriesException();
+      }
+      throw err;
+    }
+
+    await this.auditService.record({
+      userId: actor.userId,
+      entityType: 'CUSTOMER',
+      entityId: id,
+      action: 'CUSTOMER_DELETED',
+      oldValues: { name: existing.name, email: existing.email, mobile: existing.mobile },
+      ipAddress: actor.ipAddress,
+      userAgent: actor.userAgent,
+    });
   }
 
   private async assertNoDuplicate(

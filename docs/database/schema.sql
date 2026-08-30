@@ -1,6 +1,10 @@
 -- Aryan Landmark Solutions
--- FINAL 6-TABLE POSTGRESQL REFERENCE SCHEMA
+-- POSTGRESQL REFERENCE SCHEMA
 -- Executable source of truth: prisma/schema.prisma
+--
+-- NOTE: this file does not yet include the follow_ups table (added
+-- Phase 16A) — a pre-existing documentation gap from before this phase,
+-- not introduced here. notifications (this phase) is included below.
 --
 -- IMPORTANT (Phase 9C-fix):
 -- This file documents the CURRENT database schema for readability. It is
@@ -33,6 +37,14 @@ CREATE TYPE property_category AS ENUM (
 
 CREATE TYPE property_status AS ENUM (
   'AVAILABLE','SOLD','ON_HOLD','INACTIVE'
+);
+
+-- India-relevant set: SQ_FT/SQ_YD/SQ_M for residential/commercial-scale
+-- listings, ACRE/GUNTHA/HECTARE for agricultural land. SQ_YD/SQ_M added
+-- later via an additive ALTER TYPE ... ADD VALUE migration (no existing
+-- rows touched) to match Flutter's six-value area-unit picker.
+CREATE TYPE property_area_unit AS ENUM (
+  'SQ_FT','SQ_YD','SQ_M','ACRE','GUNTHA','HECTARE'
 );
 
 CREATE TYPE attachment_type AS ENUM (
@@ -111,8 +123,12 @@ CREATE TABLE properties (
   property_type VARCHAR(50) NOT NULL,
   category property_category NOT NULL,
   area NUMERIC(14,2),
-  area_unit VARCHAR(20),
+  -- Controlled enum as of this phase (was free-text VARCHAR(20) with
+  -- inconsistent real values — normalized by migration).
+  area_unit property_area_unit,
   price NUMERIC(18,2),
+  -- Not client-settable as of this phase (India-only application, always
+  -- 'INR') — column/value retained for backward compatibility.
   price_unit VARCHAR(20),
   gat_no_details VARCHAR(255),
   description TEXT,
@@ -171,14 +187,24 @@ CREATE TABLE inquiries (
   remarks TEXT,
   is_public BOOLEAN NOT NULL DEFAULT FALSE,
 
-  -- Phase 11 — buyer matching preferences. Only meaningful when
-  -- type='BUYER'; independent of the customer's residential
-  -- address/pincode and of whatever property_id this inquiry references.
-  preferred_city VARCHAR(100),
-  preferred_pincode VARCHAR(10),
+  -- Unified location fields — used by BOTH BUYER and SELLER inquiries,
+  -- replacing the old BUYER-only preferred_city/preferred_pincode. For a
+  -- SELLER inquiry, kept in sync with the linked property's own
+  -- city/state/pincode/locality (application-layer, not a DB trigger —
+  -- see InquiriesService/PropertiesService); never independently
+  -- editable via the API while a property is linked. pincode is the
+  -- mandatory exact-match matching gate; city/locality are the
+  -- fuzzy/normalized matching signals.
+  city VARCHAR(100),
+  state VARCHAR(100),
+  pincode VARCHAR(10),
+  -- Locality/area text — synced from properties.locality only (never
+  -- properties.address) for a SELLER inquiry.
+  locality VARCHAR(150),
   -- Maximum price the buyer will pay; directly comparable to
   -- properties.price (same precision, same implicit currency/unit — no
-  -- unit-conversion support exists).
+  -- unit-conversion support exists). Still BUYER-only — unchanged this
+  -- phase.
   max_budget NUMERIC(18,2),
 
   -- NULL = not yet submitted; non-NULL = submitted, at the recorded time.
@@ -200,6 +226,10 @@ CREATE INDEX idx_inquiries_public ON inquiries(is_public);
 CREATE INDEX idx_inquiries_created ON inquiries(created_at DESC);
 -- Justified by GET /inquiries/{id}/matches' WHERE type='BUYER' filter.
 CREATE INDEX idx_inquiries_type ON inquiries(type);
+-- Pincode is now the mandatory matching gate for both directions (this
+-- phase) — was city, reached via a join through properties, for the
+-- SELLER side.
+CREATE INDEX idx_inquiries_type_pincode ON inquiries(type, pincode);
 
 CREATE TABLE attachments (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -278,6 +308,30 @@ CREATE TABLE inquiry_assignments (
 
 CREATE INDEX idx_inquiry_assignments_inquiry
   ON inquiry_assignments(inquiry_id,assigned_at DESC);
+
+-- In-app notifications (this phase). Generic entity_type/entity_id/
+-- free-text type shape, same as audit_logs below — currently produced
+-- only for ADMIN-initiated inquiry assignment
+-- (type='INQUIRY_ASSIGNED', entity_type='INQUIRY').
+CREATE TABLE notifications (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+
+  type VARCHAR(50) NOT NULL,
+  title VARCHAR(255) NOT NULL,
+  message TEXT NOT NULL,
+
+  entity_type VARCHAR(100),
+  entity_id UUID,
+
+  is_read BOOLEAN NOT NULL DEFAULT FALSE,
+  read_at TIMESTAMPTZ,
+
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_notifications_user
+  ON notifications(user_id,is_read,created_at DESC);
 
 CREATE TABLE audit_logs (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

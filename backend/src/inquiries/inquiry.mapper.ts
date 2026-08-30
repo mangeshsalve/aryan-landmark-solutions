@@ -36,6 +36,8 @@ export interface PublicInquiry {
   id: string;
   inquiryNumber: string;
   customerId: string | null;
+  /** This phase — the linked customer's display name; null when customerId is null. */
+  customerName: string | null;
   propertyId: string | null;
   type: InquiryTypeValue | null;
   priority: InquiryPriorityValue;
@@ -49,9 +51,16 @@ export interface PublicInquiry {
   assignedTo: InquiryUserSummary | null;
   remarks: string | null;
   isPublic: boolean;
-  /** BUYER matching preferences (Phase 11) — see Phase 11 report Part 4/5/6. */
-  preferredCity: string | null;
-  preferredPincode: string | null;
+  /**
+   * Unified location fields (this phase) — used by both BUYER and SELLER.
+   * For SELLER, synced from the linked Property (InquiriesService/
+   * PropertiesService); see those services' doc comments for the sync
+   * rule. `locality` is the fuzzy-matching signal alongside `city`.
+   */
+  city: string | null;
+  state: string | null;
+  pincode: string | null;
+  locality: string | null;
   maxBudget: number | null;
   submittedAt: Date | null;
   createdAt: Date;
@@ -74,6 +83,14 @@ interface InquiryRow {
   id: string;
   inquiryNumber: string;
   customerId: string | null;
+  /**
+   * Populated via Prisma `include`/`select` where fetched (list()'s
+   * `customer: { select: { name: true } }`, or toDetail()'s already-
+   * fetched full customer row) — always provided by every current
+   * caller, but optional in the type so a future caller that doesn't
+   * need it isn't forced to fetch it.
+   */
+  customer?: { name: string } | null;
   propertyId: string | null;
   type: string | null;
   priority: string;
@@ -87,8 +104,10 @@ interface InquiryRow {
   assignedTo?: InquiryUserRelationRow | null;
   remarks: string | null;
   isPublic: boolean;
-  preferredCity: string | null;
-  preferredPincode: string | null;
+  city: string | null;
+  state: string | null;
+  pincode: string | null;
+  locality: string | null;
   maxBudget: unknown; // Prisma Decimal at runtime — not JSON-serializable directly
   submittedAt: Date | null;
   createdAt: Date;
@@ -112,6 +131,7 @@ export function toPublicInquiry(row: InquiryRow): PublicInquiry {
     id: row.id,
     inquiryNumber: row.inquiryNumber,
     customerId: row.customerId,
+    customerName: row.customer?.name ?? null,
     propertyId: row.propertyId,
     type: row.type as InquiryTypeValue | null,
     priority: row.priority as InquiryPriorityValue,
@@ -123,8 +143,10 @@ export function toPublicInquiry(row: InquiryRow): PublicInquiry {
     assignedTo: toInquiryUserSummary(row.assignedTo),
     remarks: row.remarks,
     isPublic: row.isPublic,
-    preferredCity: row.preferredCity,
-    preferredPincode: row.preferredPincode,
+    city: row.city,
+    state: row.state,
+    pincode: row.pincode,
+    locality: row.locality,
     maxBudget: toNullableNumber(row.maxBudget),
     submittedAt: row.submittedAt,
     createdAt: row.createdAt,

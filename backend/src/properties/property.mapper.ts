@@ -1,4 +1,8 @@
-import { PropertyCategoryValue, PropertyStatusValue } from '../common/types/domain-enums';
+import {
+  PropertyAreaUnitValue,
+  PropertyCategoryValue,
+  PropertyStatusValue,
+} from '../common/types/domain-enums';
 
 /**
  * Matches components.schemas.Property in docs/api/openapi.yaml exactly —
@@ -11,7 +15,7 @@ export interface PublicProperty {
   propertyType: string;
   category: PropertyCategoryValue;
   area: number | null;
-  areaUnit: string | null;
+  areaUnit: PropertyAreaUnitValue | null;
   price: number | null;
   priceUnit: string | null;
   gatNoDetails: string | null;
@@ -66,7 +70,7 @@ export function toPublicProperty(row: PropertyRow): PublicProperty {
     propertyType: row.propertyType,
     category: row.category as PropertyCategoryValue,
     area: toNullableNumber(row.area),
-    areaUnit: row.areaUnit,
+    areaUnit: row.areaUnit as PropertyAreaUnitValue | null,
     price: toNullableNumber(row.price),
     priceUnit: row.priceUnit,
     gatNoDetails: row.gatNoDetails,

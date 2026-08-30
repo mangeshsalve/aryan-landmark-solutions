@@ -1,5 +1,5 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { IsString, MaxLength, MinLength } from 'class-validator';
+import { IsEmail, IsString, MaxLength, MinLength } from 'class-validator';
 
 /**
  * Matches components.schemas.LoginRequest in docs/api/openapi.yaml.
@@ -8,11 +8,11 @@ import { IsString, MaxLength, MinLength } from 'class-validator';
  * userType, id, or any other identity field.
  */
 export class LoginDto {
-  @ApiProperty({ example: 'EMP001', description: 'users.user_id' })
-  @IsString()
+  @ApiProperty({ example: 'john.doe@example.com', description: 'users.email' })
+  @IsEmail()
   @MinLength(1)
   @MaxLength(50)
-  username!: string;
+  email!: string;
 
   @ApiProperty({ format: 'password' })
   @IsString()

@@ -17,6 +17,7 @@ erDiagram
     USERS ||--o{ INQUIRY_ASSIGNMENTS : assigns
 
     USERS ||--o{ AUDIT_LOGS : performs
+    USERS ||--o{ NOTIFICATIONS : receives
 
     USERS {
         uuid id PK
@@ -36,7 +37,7 @@ erDiagram
         varchar property_type
         enum category
         decimal area
-        varchar area_unit
+        enum area_unit
         decimal price
         varchar price_unit
         varchar gat_no_details
@@ -63,8 +64,10 @@ erDiagram
         uuid assigned_to_user_id FK
         text remarks
         boolean is_public
-        varchar preferred_city
-        varchar preferred_pincode
+        varchar city
+        varchar state
+        varchar pincode
+        varchar locality
         decimal max_budget
         timestamptz submitted_at
     }
@@ -94,6 +97,19 @@ erDiagram
         timestamptz assigned_at
         text reason
         uuid created_by FK
+    }
+
+    NOTIFICATIONS {
+        uuid id PK
+        uuid user_id FK
+        varchar type
+        varchar title
+        text message
+        varchar entity_type
+        uuid entity_id
+        boolean is_read
+        timestamptz read_at
+        timestamptz created_at
     }
 
     AUDIT_LOGS {

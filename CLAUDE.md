@@ -214,19 +214,38 @@ exact commands and real-database test transcripts):
    step trusts a client-echoed R2 key only after prefix-pattern
    matching + an R2 existence check, not a server-held record of what
    was actually issued.
-5. **Buyer/property matching assumptions** (Phase 11) — three deliberate,
-   flagged design decisions rather than confirmed business requirements:
-   (a) location match is city-only (`preferred_city` vs `property.city`)
-   — `preferred_locality` was considered and not added, on the reasoning
-   that the separately-weighted pincode criterion already covers
-   finer-grained precision; (b) budget is a single `max_budget` ceiling
-   compared against `property.price`, not a min/max range — chosen
-   because `properties.price` is itself a single value, not a range;
-   (c) no currency/unit conversion exists — `max_budget` and
+5. **Buyer/property matching assumptions** (Phase 11) — two still-open,
+   deliberate, flagged design decisions:
+   (a) budget is a single `max_budget` ceiling compared against
+   `property.price`, not a min/max range — chosen because
+   `properties.price` is itself a single value, not a range;
+   (b) no currency/unit conversion exists — `max_budget` and
    `property.price` are compared as raw numbers, correct only because
    every property in this project currently uses `price_unit = 'INR'`.
-   None of these are enforced anywhere beyond application logic; revisit
-   if a real multi-currency or locality-level requirement emerges.
+   Neither is enforced anywhere beyond application logic; revisit if a
+   real multi-currency or price-range requirement emerges.
+   — RESOLVED (this phase): location match was city-only in Phase 11,
+   with `preferred_locality` explicitly considered and rejected at the
+   time. This phase reverses that decision — `inquiries.city`/`state`/
+   `pincode`/`locality` are now unified fields used by both BUYER and
+   SELLER (replacing the old BUYER-only `preferred_city`/
+   `preferred_pincode`), pincode is now the mandatory matching gate
+   (was city), and location scoring is `MAX(cityScore, localityScore)`
+   — city via normalized exact comparison (**not** fuzzy), locality via
+   fuzzy token overlap. See `docs/database/database-design.md`'s
+   "Buyer/property matching" section and
+   `backend/src/inquiries/location-match.util.ts` for the full
+   algorithm.
+
+   Documentation note (not a behavior change): under this 30/50/20
+   weighting, a gated candidate's score can only ever total 30, 50, 80,
+   or 100 — never anything in between, including exactly 70. The
+   threshold stays `>= 70`, unchanged, but since 80 is the smallest
+   achievable value that clears it, the *effective* minimum passing
+   score today is 80 (pincode + budget alone, at 50, is never enough on
+   its own). Purely a mathematical consequence of the current weights,
+   documented here for clarity — not a threshold change and not a new
+   rule.
 
 ## Scope discipline (has held for 5 phases — keep it up)
 

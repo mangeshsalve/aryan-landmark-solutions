@@ -20,7 +20,7 @@ export class MasterAuthController {
   // radius of a master credential.
   @Throttle({ default: { limit: 5, ttl: 900_000 } })
   async login(@Body() dto: LoginDto) {
-    const result = await this.masterAuthService.login(dto.username, dto.password);
+    const result = await this.masterAuthService.login(dto.email, dto.password);
     return { success: true, data: result };
   }
 }

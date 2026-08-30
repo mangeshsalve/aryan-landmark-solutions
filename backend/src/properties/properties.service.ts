@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import {
   ForbiddenRoleException,
   PropertyDuplicateException,
@@ -7,6 +8,9 @@ import {
 import { ApplicationRoleValue } from '../common/types/domain-enums';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
+import { AttachmentsService } from '../attachments/attachments.service';
+import { ListAttachmentsQueryDto } from '../attachments/dto/list-attachments-query.dto';
+import { deriveSyncedLocationFromProperty } from '../inquiries/location-match.util';
 import { CreatePropertyDto } from './dto/create-property.dto';
 import { ListPropertiesQueryDto } from './dto/list-properties-query.dto';
 import { ListPublicPropertiesQueryDto } from './dto/list-public-properties-query.dto';
@@ -44,6 +48,7 @@ export class PropertiesService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly auditService: AuditService,
+    private readonly attachmentsService: AttachmentsService,
   ) {}
 
   async list(query: ListPropertiesQueryDto): Promise<PaginatedResult<PublicProperty>> {
@@ -167,7 +172,9 @@ export class PropertiesService {
         area: dto.area ?? null,
         areaUnit: dto.areaUnit ?? null,
         price: dto.price ?? null,
-        priceUnit: dto.priceUnit ?? null,
+        // Not client-settable (this phase) — India-only application,
+        // price is always INR. See CreatePropertyDto's doc comment.
+        priceUnit: 'INR',
         gatNoDetails: dto.gatNoDetails ?? null,
         description: dto.description ?? null,
         address: dto.address ?? null,
@@ -196,6 +203,14 @@ export class PropertiesService {
     return toPublicProperty(created);
   }
 
+  /**
+   * Transactional as of this phase — a property's own row update and its
+   * propagation to every linked SELLER inquiry's location snapshot
+   * (below) must succeed or fail together, or the two sources could end
+   * up divergent, which is exactly what the unified-location design is
+   * meant to prevent (see InquiriesService's location-sync doc comments).
+   * No other change to this method's prior behavior.
+   */
   async update(id: string, dto: UpdatePropertyDto, actor: Actor): Promise<PublicProperty> {
     const existing = await this.prisma.property.findUnique({ where: { id } });
     if (!existing) {
@@ -227,30 +242,55 @@ export class PropertiesService {
       isPublic: existing.isPublic,
     };
 
-    const updated = await this.prisma.property.update({
-      where: { id },
-      data: {
-        propertyCode: dto.propertyCode ?? undefined,
-        propertyType: dto.propertyType ?? undefined,
-        category: dto.category ?? undefined,
-        area: dto.area ?? undefined,
-        areaUnit: dto.areaUnit ?? undefined,
-        price: dto.price ?? undefined,
-        priceUnit: dto.priceUnit ?? undefined,
-        gatNoDetails: dto.gatNoDetails ?? undefined,
-        description: dto.description ?? undefined,
-        address: dto.address ?? undefined,
-        locality: dto.locality ?? undefined,
-        city: dto.city ?? undefined,
-        state: dto.state ?? undefined,
-        pincode: dto.pincode ?? undefined,
-        latitude: dto.latitude ?? undefined,
-        longitude: dto.longitude ?? undefined,
-        mapUrl: dto.mapUrl ?? undefined,
-        status: dto.status ?? undefined,
-        isPublic: dto.isPublic ?? undefined,
-        updatedByUserId: actor.userId,
-      },
+    const updated = await this.prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+      const result = await tx.property.update({
+        where: { id },
+        data: {
+          propertyCode: dto.propertyCode ?? undefined,
+          propertyType: dto.propertyType ?? undefined,
+          category: dto.category ?? undefined,
+          area: dto.area ?? undefined,
+          areaUnit: dto.areaUnit ?? undefined,
+          price: dto.price ?? undefined,
+          // priceUnit is not in UpdatePropertyDto (this phase) — never
+          // updated after creation, stays 'INR' for the life of the row.
+          gatNoDetails: dto.gatNoDetails ?? undefined,
+          description: dto.description ?? undefined,
+          address: dto.address ?? undefined,
+          locality: dto.locality ?? undefined,
+          city: dto.city ?? undefined,
+          state: dto.state ?? undefined,
+          pincode: dto.pincode ?? undefined,
+          latitude: dto.latitude ?? undefined,
+          longitude: dto.longitude ?? undefined,
+          mapUrl: dto.mapUrl ?? undefined,
+          status: dto.status ?? undefined,
+          isPublic: dto.isPublic ?? undefined,
+          updatedByUserId: actor.userId,
+        },
+      });
+
+      // Location propagation (this phase, approved plan) — only when
+      // city/state/pincode/locality actually changed, and only ever
+      // reaches SELLER inquiries (BUYER's own location is never
+      // property-derived). Uses the *result* of this write (not dto
+      // directly), so a field this request left untouched propagates
+      // its already-existing value rather than an accidental undefined.
+      const locationChanged =
+        result.city !== existing.city ||
+        result.state !== existing.state ||
+        result.pincode !== existing.pincode ||
+        result.locality !== existing.locality;
+
+      if (locationChanged) {
+        const synced = deriveSyncedLocationFromProperty(result);
+        await tx.inquiry.updateMany({
+          where: { propertyId: id, type: 'SELLER' },
+          data: synced,
+        });
+      }
+
+      return result;
     });
 
     await this.auditService.record({
@@ -265,6 +305,46 @@ export class PropertiesService {
     });
 
     return toPublicProperty(updated);
+  }
+
+  /**
+   * DELETE /properties/{id} (Phase 18A Part 7). ADMIN-only, enforced at
+   * the controller. Relationships inspected before writing this:
+   * inquiries.property_id is ON DELETE SET NULL (schema.sql/baseline
+   * migration) — a property can already be safely deleted while
+   * inquiries reference it; they just lose that property link and fall
+   * back to the same "no property yet" state a lightweight inquiry
+   * starts in (Phase 13B), nothing breaks. attachments.property_id is
+   * ON DELETE CASCADE, so the DB alone won't orphan rows — but it also
+   * won't touch R2, so (same reasoning as InquiriesService.delete())
+   * property-linked attachments are removed first through
+   * AttachmentsService.remove(), one at a time, before the property row
+   * itself is deleted.
+   */
+  async delete(id: string, actor: Actor): Promise<void> {
+    const existing = await this.prisma.property.findUnique({ where: { id } });
+    if (!existing) {
+      throw new PropertyNotFoundException();
+    }
+
+    const attachments = await this.attachmentsService.list({
+      propertyId: id,
+    } as ListAttachmentsQueryDto);
+    for (const attachment of attachments) {
+      await this.attachmentsService.remove(attachment.id, actor);
+    }
+
+    await this.prisma.property.delete({ where: { id } });
+
+    await this.auditService.record({
+      userId: actor.userId,
+      entityType: 'PROPERTY',
+      entityId: id,
+      action: 'PROPERTY_DELETED',
+      oldValues: { propertyCode: existing.propertyCode, status: existing.status },
+      ipAddress: actor.ipAddress,
+      userAgent: actor.userAgent,
+    });
   }
 
   /**

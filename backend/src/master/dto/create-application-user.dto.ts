@@ -30,7 +30,6 @@ export class CreateApplicationUserDto {
   name!: string;
 
   @ApiPropertyOptional()
-  @IsOptional()
   @IsEmail()
   @MaxLength(255)
   email?: string;

@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   HttpCode,
   HttpStatus,
@@ -84,6 +85,28 @@ export class InquiriesController {
       userAgent: normalizeUserAgent(req.headers['user-agent']),
     });
     return { success: true, data: inquiry };
+  }
+
+  /**
+   * ADMIN-only (Phase 18A) — overrides the class-level
+   * @Roles('ADMIN','EMPLOYEE') for just this route. See
+   * InquiriesService.delete()'s doc comment for the cascade/R2 cleanup
+   * behavior.
+   */
+  @Delete(':inquiryId')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @Roles('ADMIN')
+  async remove(
+    @Param('inquiryId', ParseUUIDPipe) inquiryId: string,
+    @CurrentUser() user: ApplicationJwtPayload,
+    @Req() req: Request,
+  ) {
+    await this.inquiriesService.delete(inquiryId, {
+      userId: user.sub,
+      role: user.role,
+      ipAddress: req.ip,
+      userAgent: normalizeUserAgent(req.headers['user-agent']),
+    });
   }
 
   @Post(':inquiryId/submit')

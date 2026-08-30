@@ -1,0 +1,23 @@
+-- Property area_unit: add SQ_YD (Square Yard) and SQ_M (Square Meter) to
+-- the existing controlled list (SQ_FT, ACRE, GUNTHA, HECTARE — introduced
+-- by 20260829120000_property_area_unit_enum_and_notifications).
+--
+-- Flutter already offers six area-unit display values (Sq Ft, Sq Yd, Sq M,
+-- Acre, Guntha, Hectare); the backend only supported four. This migration
+-- closes that gap.
+--
+-- Purely additive: `ALTER TYPE ... ADD VALUE` appends a new label to an
+-- existing Postgres enum type without touching a single existing row —
+-- there is no free-text legacy data to normalize this time (unlike the
+-- migration that introduced the enum), since no property in this database
+-- has ever held anything resembling "Sq Yd"/"Sq M" (those values didn't
+-- exist as options until now). No UPDATE statement is needed or included.
+--
+-- `IF NOT EXISTS` makes each ADD VALUE idempotent in case this migration
+-- is ever inspected/re-run manually outside Prisma's own tracking.
+-- `BEFORE`/`AFTER` positioning keeps the enum's internal catalog order
+-- matching schema.prisma's declared order (SQ_FT, SQ_YD, SQ_M, ACRE,
+-- GUNTHA, HECTARE) — cosmetic only (nothing in this codebase sorts by
+-- area_unit), but kept consistent rather than left to append-at-the-end.
+ALTER TYPE "property_area_unit" ADD VALUE IF NOT EXISTS 'SQ_YD' AFTER 'SQ_FT';
+ALTER TYPE "property_area_unit" ADD VALUE IF NOT EXISTS 'SQ_M' AFTER 'SQ_YD';

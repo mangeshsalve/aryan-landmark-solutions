@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   HttpCode,
   HttpStatus,
@@ -80,6 +81,23 @@ export class PropertiesController {
       userAgent: normalizeUserAgent(req.headers['user-agent']),
     });
     return { success: true, data: property };
+  }
+
+  /** ADMIN-only (Phase 18A) — overrides the class-level @Roles('ADMIN','EMPLOYEE'). */
+  @Delete(':propertyId')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @Roles('ADMIN')
+  async remove(
+    @Param('propertyId', ParseUUIDPipe) propertyId: string,
+    @CurrentUser() user: ApplicationJwtPayload,
+    @Req() req: Request,
+  ) {
+    await this.propertiesService.delete(propertyId, {
+      userId: user.sub,
+      role: user.role,
+      ipAddress: req.ip,
+      userAgent: normalizeUserAgent(req.headers['user-agent']),
+    });
   }
 }
 

@@ -63,7 +63,7 @@ export class MasterUsersService {
           role: dto.role,
           passwordHash,
           name: dto.name,
-          email: dto.email ?? null,
+          email: dto.email,
           mobile: dto.mobile,
           alternateMobile: dto.alternateMobile ?? null,
           address: dto.address ?? null,

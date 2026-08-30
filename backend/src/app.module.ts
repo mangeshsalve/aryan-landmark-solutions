@@ -17,6 +17,8 @@ import { AttachmentsModule } from './attachments/attachments.module';
 import { InquiriesModule } from './inquiries/inquiries.module';
 import { MasterModule } from './master/master.module';
 import { UsersModule } from './users/users.module';
+import { FollowUpsModule } from './follow-ups/follow-ups.module';
+import { NotificationsModule } from './notifications/notifications.module';
 
 @Module({
   imports: [
@@ -40,6 +42,8 @@ import { UsersModule } from './users/users.module';
     InquiriesModule,
     MasterModule,
     UsersModule,
+    FollowUpsModule,
+    NotificationsModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: AllExceptionsFilter },

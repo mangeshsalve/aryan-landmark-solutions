@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   HttpCode,
   HttpStatus,
@@ -80,6 +81,22 @@ export class CustomersController {
       userAgent: normalizeUserAgent(req.headers['user-agent']),
     });
     return { success: true, data: customer };
+  }
+
+  /** ADMIN-only (Phase 18A) — overrides the class-level @Roles('ADMIN','EMPLOYEE'). */
+  @Delete(':id')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @Roles('ADMIN')
+  async remove(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: ApplicationJwtPayload,
+    @Req() req: Request,
+  ) {
+    await this.customersService.delete(id, {
+      userId: user.sub,
+      ipAddress: req.ip,
+      userAgent: normalizeUserAgent(req.headers['user-agent']),
+    });
   }
 }
 
