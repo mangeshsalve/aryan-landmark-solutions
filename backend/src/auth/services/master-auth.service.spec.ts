@@ -16,6 +16,7 @@ describe('MasterAuthService', () => {
     userId: 'MASTER001',
     userType: 'MASTER' as const,
     role: null,
+    email: 'master@example.com',
     passwordHash: 'hashed-password',
     status: 'ACTIVE' as const,
   };
@@ -47,12 +48,12 @@ describe('MasterAuthService', () => {
     prisma.user.findFirst.mockResolvedValue(masterUser);
     passwordService.verify.mockResolvedValue(true);
 
-    const result = await service.login('MASTER001', 'correct-password');
+    const result = await service.login('master@example.com', 'correct-password');
 
     expect(result.accessToken).toBe('signed.master.jwt');
     expect(result.tokenScope).toBe('MASTER');
     expect(prisma.user.findFirst).toHaveBeenCalledWith({
-      where: { userId: 'MASTER001', userType: 'MASTER' },
+      where: { email: { equals: 'master@example.com', mode: 'insensitive' }, userType: 'MASTER' },
     });
     expect(tokenService.signMasterToken).toHaveBeenCalledWith({
       sub: masterUser.id,
@@ -60,17 +61,19 @@ describe('MasterAuthService', () => {
     });
   });
 
-  it('rejects an unknown master username', async () => {
+  it('rejects an unknown master email', async () => {
     prisma.user.findFirst.mockResolvedValue(null);
 
-    await expect(service.login('NOBODY', 'x')).rejects.toBeInstanceOf(InvalidCredentialsException);
+    await expect(service.login('nobody@example.com', 'x')).rejects.toBeInstanceOf(
+      InvalidCredentialsException,
+    );
   });
 
   it('rejects an invalid master password', async () => {
     prisma.user.findFirst.mockResolvedValue(masterUser);
     passwordService.verify.mockResolvedValue(false);
 
-    await expect(service.login('MASTER001', 'wrong')).rejects.toBeInstanceOf(
+    await expect(service.login('master@example.com', 'wrong')).rejects.toBeInstanceOf(
       InvalidCredentialsException,
     );
   });
@@ -78,7 +81,7 @@ describe('MasterAuthService', () => {
   it('rejects a blocked master account', async () => {
     prisma.user.findFirst.mockResolvedValue({ ...masterUser, status: 'BLOCKED' });
 
-    await expect(service.login('MASTER001', 'correct-password')).rejects.toBeInstanceOf(
+    await expect(service.login('master@example.com', 'correct-password')).rejects.toBeInstanceOf(
       InvalidCredentialsException,
     );
     expect(passwordService.verify).not.toHaveBeenCalled();

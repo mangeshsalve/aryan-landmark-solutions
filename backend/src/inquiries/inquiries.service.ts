@@ -267,18 +267,39 @@ export class InquiriesService {
       await this.assertCustomer(dto.customerId);
     }
 
-    // Phase [this] — a NEW, different, non-null propertyId being linked
-    // in this request (not just present-and-unchanged, and not the
-    // pre-existing null-doesn't-actually-clear quirk of
-    // `dto.propertyId ?? undefined` below) is what triggers a location
-    // re-sync from the newly-linked property.
+    // Effective resulting type/propertyId after this update — computed
+    // here (ahead of the property-fetch decision below, which needs
+    // both) rather than down by locationUpdate as before. Mirrors what
+    // actually gets persisted for propertyId itself (`dto.propertyId ??
+    // undefined` further below — a null doesn't clear it).
+    const resultingType = dto.type ?? existing.type;
+    const resultingPropertyId = dto.propertyId ?? existing.propertyId;
+
+    // A NEW, different, non-null propertyId being linked in this
+    // request (not just present-and-unchanged, and not the pre-existing
+    // null-doesn't-actually-clear quirk of `dto.propertyId ?? undefined`
+    // below) is one trigger for a location re-sync from the property.
     const isLinkingNewProperty =
       dto.propertyId !== undefined &&
       dto.propertyId !== null &&
       dto.propertyId !== existing.propertyId;
+    // Bug fix (this phase): an inquiry TRANSITIONING INTO SELLER status
+    // (from BUYER, or from no type at all) is the other trigger, even
+    // when its propertyId isn't "new" in this request — otherwise an
+    // inquiry that already carried a propertyId from before it became a
+    // SELLER (structurally possible: propertyId has never been
+    // type-restricted) would flip to SELLER with its location frozen at
+    // whatever it was before, silently disagreeing with its own linked
+    // property until some later, unrelated property edit happened to
+    // fix it. Does not affect SELLER→SELLER (no type change) or
+    // SELLER→BUYER — see the intended invariant this fixes.
+    const isTransitioningIntoSeller = existing.type !== 'SELLER' && resultingType === 'SELLER';
+
     let newProperty: PropertyLocationSnapshot | null = null;
     if (isLinkingNewProperty) {
       newProperty = await this.assertProperty(dto.propertyId as string);
+    } else if (isTransitioningIntoSeller && resultingPropertyId) {
+      newProperty = await this.assertProperty(resultingPropertyId);
     }
 
     if (dto.handledByUserId && dto.handledByUserId !== existing.handledByUserId) {
@@ -291,23 +312,23 @@ export class InquiriesService {
       await this.assertAssignableUser(dto.assignedToUserId as string);
     }
 
-    // Location sync (this phase, approved plan). Mirrors what actually
-    // gets persisted for propertyId itself (`dto.propertyId ?? undefined`
-    // below — a null doesn't clear it), so this reads the *effective*
-    // resulting type/propertyId, not just the raw dto values.
-    const resultingType = dto.type ?? existing.type;
-    const resultingPropertyId = dto.propertyId ?? existing.propertyId;
+    // Location sync (approved plan; transitioning-into-SELLER fix this
+    // phase).
     const sellerWithProperty = resultingType === 'SELLER' && !!resultingPropertyId;
 
     let locationUpdate: Partial<PropertyLocationSnapshot>;
     if (sellerWithProperty) {
       // For a SELLER with a linked property, location is always
       // server-controlled: re-synced when a *new* property is linked in
-      // this request, otherwise left completely untouched — any
-      // city/state/pincode/locality the client also sent are silently
-      // ignored, never merged, exactly like create()'s override rule.
+      // this request, OR when the inquiry is transitioning into SELLER
+      // status for the first time (even with an unchanged propertyId) —
+      // otherwise left completely untouched. Any city/state/pincode/
+      // locality the client also sent are silently ignored in either
+      // sync case, never merged, exactly like create()'s override rule.
       locationUpdate =
-        isLinkingNewProperty && newProperty ? deriveSyncedLocationFromProperty(newProperty) : {};
+        (isLinkingNewProperty || isTransitioningIntoSeller) && newProperty
+          ? deriveSyncedLocationFromProperty(newProperty)
+          : {};
     } else {
       // BUYER, or a still-lightweight SELLER with no property yet:
       // directly client-editable, same partial-update semantics as every
@@ -337,35 +358,36 @@ export class InquiriesService {
       maxBudget: existing.maxBudget,
     };
 
+    const updateData = {
+      customerId: dto.customerId ?? undefined,
+      propertyId: dto.propertyId ?? undefined,
+      type: dto.type ?? undefined,
+      priority: dto.priority ?? undefined,
+      status: dto.status ?? undefined,
+      externalReference: dto.externalReference ?? undefined,
+      // Phase 18A Requirement 3: reassigning forces handledByUserId to
+      // the same newly-assigned user (both current fields point at
+      // whoever is now assigned) — a raw dto.handledByUserId is only
+      // honored when this update is NOT a reassignment, preserving the
+      // pre-existing "these can independently diverge" capability
+      // outside of the assignment moment itself (see class doc comment).
+      handledByUserId: isReassigning ? dto.assignedToUserId : (dto.handledByUserId ?? undefined),
+      assignedToUserId: isReassigning ? dto.assignedToUserId : undefined,
+      remarks: dto.remarks ?? undefined,
+      city: locationUpdate.city,
+      state: locationUpdate.state,
+      pincode: locationUpdate.pincode,
+      locality: locationUpdate.locality,
+      maxBudget: dto.maxBudget ?? undefined,
+      updatedByUserId: actor.userId,
+    };
+
     const updated = await this.prisma.$transaction(async (tx: Prisma.TransactionClient) => {
-      const result = await tx.inquiry.update({
-        where: { id },
-        data: {
-          customerId: dto.customerId ?? undefined,
-          propertyId: dto.propertyId ?? undefined,
-          type: dto.type ?? undefined,
-          priority: dto.priority ?? undefined,
-          status: dto.status ?? undefined,
-          externalReference: dto.externalReference ?? undefined,
-          // Phase 18A Requirement 3: reassigning forces handledByUserId to
-          // the same newly-assigned user (both current fields point at
-          // whoever is now assigned) — a raw dto.handledByUserId is only
-          // honored when this update is NOT a reassignment, preserving the
-          // pre-existing "these can independently diverge" capability
-          // outside of the assignment moment itself (see class doc comment).
-          handledByUserId: isReassigning
-            ? dto.assignedToUserId
-            : (dto.handledByUserId ?? undefined),
-          assignedToUserId: isReassigning ? dto.assignedToUserId : undefined,
-          remarks: dto.remarks ?? undefined,
-          city: locationUpdate.city,
-          state: locationUpdate.state,
-          pincode: locationUpdate.pincode,
-          locality: locationUpdate.locality,
-          maxBudget: dto.maxBudget ?? undefined,
-          updatedByUserId: actor.userId,
-        },
-      });
+      // This phase's fix — see applyInquiryWrite()'s doc comment. The
+      // ownership guarantee for an EMPLOYEE now lives in this write's
+      // WHERE clause, not solely in the assertCanModifyInquiry() read
+      // above. ADMIN is unaffected: unconditional update, unchanged.
+      const result = await this.applyInquiryWrite(tx, id, actor, updateData);
 
       if (isReassigning) {
         await tx.inquiryAssignment.create({
@@ -517,16 +539,19 @@ export class InquiriesService {
     await this.assertAssignableUser(dto.assignedToUserId);
 
     await this.prisma.$transaction(async (tx: Prisma.TransactionClient) => {
-      await tx.inquiry.update({
-        where: { id },
-        data: {
-          assignedToUserId: dto.assignedToUserId,
-          // Phase 18A Requirement 3: assignment/reassignment always syncs
-          // handledByUserId to the same user — both current fields point
-          // at whoever is now assigned.
-          handledByUserId: dto.assignedToUserId,
-          updatedByUserId: actor.userId,
-        },
+      // This phase's fix — see applyInquiryWrite()'s doc comment. The
+      // reassignment write for an EMPLOYEE now fails (403, via
+      // resolveConditionalWriteFailure()) if ownership changed after the
+      // initial assertCanModifyInquiry() read above, instead of
+      // succeeding unconditionally. ADMIN is unaffected: unconditional
+      // update, unchanged.
+      await this.applyInquiryWrite(tx, id, actor, {
+        assignedToUserId: dto.assignedToUserId,
+        // Phase 18A Requirement 3: assignment/reassignment always syncs
+        // handledByUserId to the same user — both current fields point
+        // at whoever is now assigned.
+        handledByUserId: dto.assignedToUserId,
+        updatedByUserId: actor.userId,
       });
 
       await tx.inquiryAssignment.create({
@@ -831,9 +856,13 @@ export class InquiriesService {
 
     this.assertCanModifyInquiry(existing, actor);
 
-    const updated = await this.prisma.inquiry.update({
-      where: { id },
-      data: { isPublic: dto.isPublic, updatedByUserId: actor.userId },
+    // This phase's fix — see applyInquiryWrite()'s doc comment. Ties the
+    // EMPLOYEE ownership guarantee to this write's WHERE clause rather
+    // than solely to the assertCanModifyInquiry() read above. ADMIN is
+    // unaffected: unconditional update, unchanged.
+    const updated = await this.applyInquiryWrite(this.prisma, id, actor, {
+      isPublic: dto.isPublic,
+      updatedByUserId: actor.userId,
     });
 
     await this.auditService.record({
@@ -941,6 +970,70 @@ export class InquiriesService {
     if (actor.role === 'EMPLOYEE' && existing.assignedToUserId !== actor.userId) {
       throw new ForbiddenRoleException('You can only modify inquiries currently assigned to you.');
     }
+  }
+
+  /**
+   * This phase's TOCTOU fix — the single write path shared by update(),
+   * assign(), and setPublicVisibility() for the inquiries row itself.
+   * ADMIN keeps the pre-existing unconditional client.inquiry.update()
+   * (unrestricted, unchanged). For EMPLOYEE, the actual authorization
+   * guarantee moves into this write's WHERE clause (assignedToUserId:
+   * actor.userId) instead of relying solely on the assertCanModifyInquiry()
+   * read at the top of each caller — that read remains as a fast-fail
+   * (avoids unnecessary validation work for the common, non-racing case)
+   * but is no longer what makes the write itself safe. A second request
+   * that reassigns the inquiry in the gap between that read and this
+   * write now causes the conditional write to match zero rows, which
+   * resolveConditionalWriteFailure() below turns into the correct
+   * 404-vs-403 outcome rather than silently succeeding on stale
+   * authorization. `client` accepts either the plain PrismaService (for
+   * setPublicVisibility(), which isn't wrapped in a $transaction) or an
+   * in-flight Prisma.TransactionClient (for update()/assign()).
+   */
+  private async applyInquiryWrite(
+    client: PrismaService | Prisma.TransactionClient,
+    id: string,
+    actor: Actor,
+    data: Prisma.InquiryUncheckedUpdateInput,
+  ) {
+    if (actor.role !== 'EMPLOYEE') {
+      return client.inquiry.update({ where: { id }, data });
+    }
+
+    const { count } = await client.inquiry.updateMany({
+      where: { id, assignedToUserId: actor.userId },
+      data,
+    });
+    if (count === 0) {
+      await this.resolveConditionalWriteFailure(client, id);
+    }
+
+    const row = await client.inquiry.findUnique({ where: { id } });
+    if (!row) {
+      // Defensive only — the updateMany above matched this exact id an
+      // instant earlier inside the same call; this cannot actually happen.
+      throw new InquiryNotFoundException();
+    }
+    return row;
+  }
+
+  /**
+   * Disambiguates a zero-row conditional write from applyInquiryWrite()
+   * above: the inquiry may have been deleted (404), or it may simply no
+   * longer be assigned to this EMPLOYEE (403) — a plain "0 rows updated"
+   * can't tell the two apart on its own, so this re-reads current
+   * existence to keep those outcomes distinct instead of collapsing into
+   * one generic result.
+   */
+  private async resolveConditionalWriteFailure(
+    client: PrismaService | Prisma.TransactionClient,
+    id: string,
+  ): Promise<never> {
+    const stillExists = await client.inquiry.findUnique({ where: { id }, select: { id: true } });
+    if (!stillExists) {
+      throw new InquiryNotFoundException();
+    }
+    throw new ForbiddenRoleException('You can only modify inquiries currently assigned to you.');
   }
 
   private async assertCustomer(customerId: string): Promise<void> {

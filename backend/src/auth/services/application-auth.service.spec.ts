@@ -17,7 +17,7 @@ describe('ApplicationAuthService', () => {
     userType: 'APPLICATION_USER' as const,
     role: 'EMPLOYEE' as const,
     name: 'Test Employee',
-    email: null,
+    email: 'employee@example.com',
     mobile: null,
     passwordHash: 'hashed-password',
     status: 'ACTIVE' as const,
@@ -47,10 +47,15 @@ describe('ApplicationAuthService', () => {
 
   // 1. Valid ADMIN login
   it('logs in a valid ADMIN user', async () => {
-    prisma.user.findFirst.mockResolvedValue({ ...baseUser, role: 'ADMIN', userId: 'ADM001' });
+    prisma.user.findFirst.mockResolvedValue({
+      ...baseUser,
+      role: 'ADMIN',
+      userId: 'ADM001',
+      email: 'admin@example.com',
+    });
     passwordService.verify.mockResolvedValue(true);
 
-    const result = await service.login('ADM001', 'correct-password');
+    const result = await service.login('admin@example.com', 'correct-password');
 
     expect(result.accessToken).toBe('signed.jwt.token');
     expect(result.user.role).toBe('ADMIN');
@@ -70,7 +75,7 @@ describe('ApplicationAuthService', () => {
     prisma.user.findFirst.mockResolvedValue(baseUser);
     passwordService.verify.mockResolvedValue(true);
 
-    const result = await service.login('EMP001', 'correct-password');
+    const result = await service.login('employee@example.com', 'correct-password');
 
     expect(result.accessToken).toBe('signed.jwt.token');
     expect(result.user.role).toBe('EMPLOYEE');
@@ -81,7 +86,7 @@ describe('ApplicationAuthService', () => {
     prisma.user.findFirst.mockResolvedValue(baseUser);
     passwordService.verify.mockResolvedValue(false);
 
-    await expect(service.login('EMP001', 'wrong-password')).rejects.toBeInstanceOf(
+    await expect(service.login('employee@example.com', 'wrong-password')).rejects.toBeInstanceOf(
       InvalidCredentialsException,
     );
     expect(tokenService.signApplicationToken).not.toHaveBeenCalled();
@@ -91,7 +96,7 @@ describe('ApplicationAuthService', () => {
   it('rejects an unknown user', async () => {
     prisma.user.findFirst.mockResolvedValue(null);
 
-    await expect(service.login('NOBODY', 'any-password')).rejects.toBeInstanceOf(
+    await expect(service.login('nobody@example.com', 'any-password')).rejects.toBeInstanceOf(
       InvalidCredentialsException,
     );
     expect(passwordService.verify).not.toHaveBeenCalled();
@@ -101,7 +106,7 @@ describe('ApplicationAuthService', () => {
   it('rejects an inactive user even with the correct password', async () => {
     prisma.user.findFirst.mockResolvedValue({ ...baseUser, status: 'INACTIVE' });
 
-    await expect(service.login('EMP001', 'correct-password')).rejects.toBeInstanceOf(
+    await expect(service.login('employee@example.com', 'correct-password')).rejects.toBeInstanceOf(
       InvalidCredentialsException,
     );
     // Fails closed before even checking the password, to avoid a timing
@@ -113,7 +118,7 @@ describe('ApplicationAuthService', () => {
   it('rejects a blocked user even with the correct password', async () => {
     prisma.user.findFirst.mockResolvedValue({ ...baseUser, status: 'BLOCKED' });
 
-    await expect(service.login('EMP001', 'correct-password')).rejects.toBeInstanceOf(
+    await expect(service.login('employee@example.com', 'correct-password')).rejects.toBeInstanceOf(
       InvalidCredentialsException,
     );
     expect(passwordService.verify).not.toHaveBeenCalled();
@@ -125,11 +130,14 @@ describe('ApplicationAuthService', () => {
   it('rejects a login attempt that resolves to no APPLICATION_USER row (customer case)', async () => {
     prisma.user.findFirst.mockResolvedValue(null);
 
-    await expect(service.login('some-customer-name', 'any-password')).rejects.toBeInstanceOf(
-      InvalidCredentialsException,
-    );
+    await expect(
+      service.login('customer@example.com', 'any-password'),
+    ).rejects.toBeInstanceOf(InvalidCredentialsException);
     expect(prisma.user.findFirst).toHaveBeenCalledWith({
-      where: { userId: 'some-customer-name', userType: 'APPLICATION_USER' },
+      where: {
+        email: { equals: 'customer@example.com', mode: 'insensitive' },
+        userType: 'APPLICATION_USER',
+      },
     });
   });
 });

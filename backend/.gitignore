@@ -7,6 +7,20 @@
 .env
 .env.local
 .env.*.local
+.dev.vars
+
+# Cloudflare Worker local state (Phase 1/2 D1 schema validation — never
+# committed, holds only local-only test data, no real credentials)
+.wrangler/
+
+# Phase 10 migration tooling's working data — real exported rows (even
+# from a local/test database) must never be committed; the tooling
+# itself lives in scripts/migration/, only its output does not.
+scripts/migration/migration-data/
+
+# scripts/production/'s temporary per-run SQL files (deleted immediately
+# after each wrangler invocation, but ignored as defense in depth).
+scripts/production/tmp/
 
 # logs
 logs

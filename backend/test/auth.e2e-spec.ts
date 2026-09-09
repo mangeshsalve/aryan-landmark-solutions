@@ -58,7 +58,7 @@ describe('Authentication & Authorization (e2e)', () => {
     userType: 'APPLICATION_USER',
     role: 'ADMIN',
     name: 'Test Admin',
-    email: null,
+    email: 'admin@example.com',
     mobile: null,
     passwordHash: 'irrelevant-mocked',
     status: 'ACTIVE',
@@ -69,6 +69,7 @@ describe('Authentication & Authorization (e2e)', () => {
     userId: 'EMP001',
     role: 'EMPLOYEE',
     name: 'Test Employee',
+    email: 'employee@example.com',
   };
   const masterRow = {
     id: 'master-uuid',
@@ -76,7 +77,7 @@ describe('Authentication & Authorization (e2e)', () => {
     userType: 'MASTER',
     role: null,
     name: 'Test Master',
-    email: null,
+    email: 'master@example.com',
     mobile: null,
     passwordHash: 'irrelevant-mocked',
     status: 'ACTIVE',
@@ -95,19 +96,34 @@ describe('Authentication & Authorization (e2e)', () => {
   // it away.
 
   beforeAll(async () => {
+    // Phase 1 production-readiness fix: env.validation.ts now fails
+    // startup if JWT_ACCESS_SECRET === MASTER_JWT_ACCESS_SECRET. This
+    // suite loads real environment values via ConfigModule.forRoot(),
+    // which — like the application itself — reads the local developer
+    // .env; that file's two JWT secrets are not guaranteed to differ
+    // (they're independent, unrelated placeholder values a developer
+    // sets locally). Override just the master secret here to a value
+    // distinct from JWT_ACCESS_SECRET, so this suite exercises real,
+    // valid configuration regardless of what the local .env currently
+    // contains. Environment variables already set on process.env are
+    // never overwritten by dotenv when ConfigModule loads the .env file,
+    // so this override reliably takes precedence.
+    process.env.MASTER_JWT_ACCESS_SECRET = 'e2e-test-master-secret-distinct-from-jwt-access';
+
     const adminPasswordHash = await passwordService.hash('admin-correct-password');
     const employeePasswordHash = await passwordService.hash('employee-correct-password');
     const masterPasswordHash = await passwordService.hash('master-correct-password');
 
     prismaMock.user.findFirst.mockImplementation(
-      ({ where }: { where: { userId: string; userType: string } }) => {
-        if (where.userType === 'APPLICATION_USER' && where.userId === 'ADM001') {
+      ({ where }: { where: { email: { equals: string }; userType: string } }) => {
+        const email = where.email.equals;
+        if (where.userType === 'APPLICATION_USER' && email === 'admin@example.com') {
           return Promise.resolve({ ...adminRow, passwordHash: adminPasswordHash });
         }
-        if (where.userType === 'APPLICATION_USER' && where.userId === 'EMP001') {
+        if (where.userType === 'APPLICATION_USER' && email === 'employee@example.com') {
           return Promise.resolve({ ...employeeRow, passwordHash: employeePasswordHash });
         }
-        if (where.userType === 'MASTER' && where.userId === 'MASTER001') {
+        if (where.userType === 'MASTER' && email === 'master@example.com') {
           return Promise.resolve({ ...masterRow, passwordHash: masterPasswordHash });
         }
         return Promise.resolve(null);
@@ -144,19 +160,19 @@ describe('Authentication & Authorization (e2e)', () => {
     await app.close();
   });
 
-  async function loginApplication(username: string, password: string) {
-    return request(app.getHttpServer()).post('/api/v1/auth/login').send({ username, password });
+  async function loginApplication(email: string, password: string) {
+    return request(app.getHttpServer()).post('/api/v1/auth/login').send({ email, password });
   }
 
-  async function loginMaster(username: string, password: string) {
+  async function loginMaster(email: string, password: string) {
     return request(app.getHttpServer())
       .post('/api/v1/master-auth/login')
-      .send({ username, password });
+      .send({ email, password });
   }
 
   // 1. Valid ADMIN login
   it('logs in a valid ADMIN over real HTTP', async () => {
-    const res = await loginApplication('ADM001', 'admin-correct-password');
+    const res = await loginApplication('admin@example.com', 'admin-correct-password');
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
     expect(res.body.data.user.role).toBe('ADMIN');
@@ -165,7 +181,7 @@ describe('Authentication & Authorization (e2e)', () => {
 
   // 2. Valid EMPLOYEE login
   it('logs in a valid EMPLOYEE over real HTTP', async () => {
-    const res = await loginApplication('EMP001', 'employee-correct-password');
+    const res = await loginApplication('employee@example.com', 'employee-correct-password');
     expect(res.status).toBe(200);
     expect(res.body.data.user.role).toBe('EMPLOYEE');
   });
@@ -173,28 +189,28 @@ describe('Authentication & Authorization (e2e)', () => {
   // 3 & 4. Invalid password / unknown user — both collapse to the same
   // generic response, per api-conventions.md's AUTH_INVALID_CREDENTIALS.
   it('rejects an invalid password with AUTH_INVALID_CREDENTIALS', async () => {
-    const res = await loginApplication('ADM001', 'totally-wrong');
+    const res = await loginApplication('admin@example.com', 'totally-wrong');
     expect(res.status).toBe(401);
     expect(res.body.success).toBe(false);
     expect(res.body.error.code).toBe('AUTH_INVALID_CREDENTIALS');
   });
 
-  it('rejects an unknown username with AUTH_INVALID_CREDENTIALS', async () => {
-    const res = await loginApplication('NOBODY', 'whatever');
+  it('rejects an unknown email with AUTH_INVALID_CREDENTIALS', async () => {
+    const res = await loginApplication('nobody@example.com', 'whatever');
     expect(res.status).toBe(401);
     expect(res.body.error.code).toBe('AUTH_INVALID_CREDENTIALS');
   });
 
   // 7. Valid MASTER login
   it('logs in a valid MASTER over real HTTP', async () => {
-    const res = await loginMaster('MASTER001', 'master-correct-password');
+    const res = await loginMaster('master@example.com', 'master-correct-password');
     expect(res.status).toBe(200);
     expect(res.body.data.tokenScope).toBe('MASTER');
   });
 
   // 8. CUSTOMER cannot login (no matching row for a customer via /auth/login)
   it('rejects a customer-shaped login attempt on /auth/login', async () => {
-    const res = await loginApplication('some-customer-name', 'whatever');
+    const res = await loginApplication('customer@example.com', 'whatever');
     expect(res.status).toBe(401);
     expect(res.body.error.code).toBe('AUTH_INVALID_CREDENTIALS');
   });
@@ -205,11 +221,11 @@ describe('Authentication & Authorization (e2e)', () => {
     let masterToken: string;
 
     beforeAll(async () => {
-      adminToken = (await loginApplication('ADM001', 'admin-correct-password')).body.data
-        .accessToken;
-      employeeToken = (await loginApplication('EMP001', 'employee-correct-password')).body.data
-        .accessToken;
-      masterToken = (await loginMaster('MASTER001', 'master-correct-password')).body.data
+      adminToken = (await loginApplication('admin@example.com', 'admin-correct-password')).body
+        .data.accessToken;
+      employeeToken = (await loginApplication('employee@example.com', 'employee-correct-password'))
+        .body.data.accessToken;
+      masterToken = (await loginMaster('master@example.com', 'master-correct-password')).body.data
         .accessToken;
     });
 

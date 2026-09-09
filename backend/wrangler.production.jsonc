@@ -1,0 +1,93 @@
+{
+  // Phase 12 — dedicated PRODUCTION configuration for the migrated
+  // Hono + D1 Worker. Deliberately a SEPARATE file from wrangler.jsonc
+  // (which stays local-only/dev-safe and is untouched by this phase)
+  // rather than a wrangler "env" block layered on top of it — a
+  // sibling file with its own explicit d1_databases entry cannot be
+  // reached by any `wrangler dev`/`--local` command that doesn't pass
+  // `--config wrangler.production.jsonc` explicitly, so local
+  // development staying safe is a structural property of this setup,
+  // not something that depends on remembering to pass `--env` or on a
+  // Worker-name-suffixing rule this repo doesn't otherwise rely on.
+  //
+  // Same "name" as wrangler.jsonc on purpose: this is still the ONE
+  // Worker script `aryan-landmark-backend-schema-validation` (never
+  // deployed before Phase 12) — this file only changes which D1
+  // database it binds to when deploying/migrating for real, not what
+  // it's named or where it lives in the account.
+  //
+  // Every command against this file must pass `--config
+  // wrangler.production.jsonc` explicitly, exactly like wrangler.jsonc
+  // itself requires `--config wrangler.jsonc` (see that file's own
+  // comment) — Wrangler does not reliably disambiguate multiple config
+  // files in one directory on its own.
+  "name": "aryan-landmark-backend-schema-validation",
+  "main": "src/worker/index.ts",
+  "compatibility_date": "2026-08-31",
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "aryan-landmark-production",
+      "database_id": "e10524c9-0ebe-4d3e-9758-b57d01e1d270"
+    }
+  ],
+
+  // Phase 36 — Cloudflare's native Workers Rate Limiting bindings
+  // (https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/).
+  // Confirmed against the installed wrangler (4.127.1)'s own config
+  // validator (validateRateLimitBinding in wrangler-dist/cli.js): a
+  // "ratelimits" binding requires exactly {name, namespace_id, simple:
+  // {limit, period}}, and `simple.period` is restricted to 10 or 60
+  // (seconds) — there is no 600s/"10 minute" window option in this
+  // binding's "simple" fixed-window algorithm. The approved policy is
+  // "10 requests/minute" application, "5 requests/minute" MASTER — a
+  // per-minute policy from the start (not a 10-minute one approximated
+  // down), so period: 60 maps onto it directly with no scaling needed.
+  // `namespace_id` is an arbitrary caller-chosen string partitioning
+  // this binding's own counters — it is NOT a separately-provisioned
+  // Cloudflare resource id (no KV/D1/R2-style "create" step exists for
+  // this binding type), confirmed by the same validator only checking
+  // it is a string.
+  "ratelimits": [
+    {
+      "name": "LOGIN_RATE_LIMITER",
+      "namespace_id": "3601",
+      "simple": { "limit": 10, "period": 60 }
+    },
+    {
+      "name": "MASTER_LOGIN_RATE_LIMITER",
+      "namespace_id": "3602",
+      "simple": { "limit": 5, "period": 60 }
+    },
+    // Phase 45B — public inquiry submission (routes/public-inquiries.ts).
+    // A public write endpoint (creates a real customer/inquiry row and
+    // triggers ADMIN notifications), so it gets its own independent
+    // budget rather than reusing either login limiter. 5 requests/minute
+    // per IP — the same policy already approved for MASTER login, a
+    // reasonable starting point for a form a genuine visitor submits at
+    // most a handful of times.
+    {
+      "name": "PUBLIC_INQUIRY_RATE_LIMITER",
+      "namespace_id": "3603",
+      "simple": { "limit": 5, "period": 60 }
+    }
+  ],
+
+  // Phase 38D — Cron Trigger for the follow-up reminder sweep
+  // (src/worker/scheduled/follow-up-reminders.ts, invoked from
+  // index.ts's `scheduled()` export). Every 5 minutes, per the approved
+  // policy — frequent enough that a due reminder is noticed promptly,
+  // infrequent enough to keep the D1 query volume from this feature
+  // negligible. No new Cloudflare resource: a Cron Trigger is plain
+  // config on the existing Worker, like the ratelimits above.
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  }
+
+  // No r2_buckets block: R2 is accessed via CLOUDFLARE_R2_* secrets +
+  // aws4fetch (S3-compatible), not a native R2Bucket binding — see
+  // src/worker/utils/r2.ts and src/worker/types/bindings.ts. The
+  // production bucket is `aryan-landmark-production-files` (created
+  // this phase), configured entirely through secrets, not this file.
+}

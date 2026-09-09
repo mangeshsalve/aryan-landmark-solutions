@@ -1,0 +1,70 @@
+{
+  // Phase 1 (schema validation) + Phase 2 (infrastructure) — LOCAL
+  // VALIDATION ONLY, still never deployed. The database_id below is a
+  // freshly-generated placeholder, not a real registered Cloudflare D1
+  // database — deploying against it, or running any command with
+  // --remote, will fail (or worse, silently create an unintended real
+  // resource) until a genuine `wrangler d1 create` happens in a later
+  // phase. Intentionally a separate identity from backend-d1-test's
+  // wrangler.jsonc/database — this project's local D1 state
+  // (.wrangler/state/v3/d1) is entirely its own, never shared.
+  //
+  // IMPORTANT: backend/wrangler.toml also exists in this same directory
+  // — a pre-existing, unrelated Cloudflare Containers setup (wraps the
+  // existing Docker image via a Durable Object), not part of this D1/
+  // Hono migration. Every command against *this* file must pass
+  // `--config wrangler.jsonc` explicitly — verified this phase that
+  // Wrangler does not reliably disambiguate the two automatically when
+  // both exist in one directory. See the Phase 2 report.
+  "name": "aryan-landmark-backend-schema-validation",
+  "main": "src/worker/index.ts",
+  "compatibility_date": "2026-08-31",
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "aryan-landmark-backend-local-only",
+      "database_id": "00000000-0000-4000-8000-000000000001"
+    }
+  ],
+
+  // Phase 36 — same two rate-limit bindings as wrangler.production.jsonc
+  // (see that file's comment for why period is 60, not 600). Required
+  // here too, not just in production: routes/auth.ts reads
+  // c.env.LOGIN_RATE_LIMITER/MASTER_LOGIN_RATE_LIMITER unconditionally,
+  // so local `wrangler dev --local --config wrangler.jsonc` needs these
+  // bound or every local login attempt throws. Distinct namespace_id
+  // values from production's, purely to keep the two environments'
+  // counters visibly separate in intent — not a shared or provisioned
+  // resource either way (see the production file's comment).
+  "ratelimits": [
+    {
+      "name": "LOGIN_RATE_LIMITER",
+      "namespace_id": "1",
+      "simple": { "limit": 10, "period": 60 }
+    },
+    {
+      "name": "MASTER_LOGIN_RATE_LIMITER",
+      "namespace_id": "2",
+      "simple": { "limit": 5, "period": 60 }
+    },
+    // Phase 45B — same limiter as wrangler.production.jsonc, required
+    // here too since routes/public-inquiries.ts reads
+    // c.env.PUBLIC_INQUIRY_RATE_LIMITER unconditionally.
+    {
+      "name": "PUBLIC_INQUIRY_RATE_LIMITER",
+      "namespace_id": "3",
+      "simple": { "limit": 5, "period": 60 }
+    }
+  ],
+
+  // Phase 38D — same Cron Trigger as wrangler.production.jsonc, added
+  // here so `wrangler dev --local --test-scheduled` can exercise the
+  // real scheduled() export locally (that flag's local trigger endpoint
+  // is only available when a cron is actually configured) — this is how
+  // this phase's own local validation runs, not something needed for
+  // ordinary HTTP-only local dev.
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  }
+}

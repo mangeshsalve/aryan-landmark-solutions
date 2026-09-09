@@ -1,0 +1,29 @@
+-- =====================================================================
+-- Phase 39 (recording-enforcement fix) — adds the internal, non-public
+-- reconciliation marker used by the scheduled inquiry-verification sweep
+-- (src/worker/scheduled/inquiry-verification-reaper.ts) to flag an
+-- ADMIN-created inquiry that is still unfinalized 24+ hours after
+-- creation and still fails both Group A (assigned employee + a real
+-- RECORDING attachment) and Group B (a customer property whose own
+-- property_type is non-blank).
+--
+-- Nullable, no backfill: every existing row (including every inquiry
+-- created before this fix) gets `verification_failed_at = NULL` — no
+-- data is invented, no existing row is touched or invalidated. The
+-- reaper itself is additionally scoped to a hardcoded post-cutover
+-- created_at window (see the scheduled module), so this column being
+-- present on old rows never causes them to be evaluated or flagged.
+--
+-- NOT a status: `inquiries.status` is untouched and unextended, per
+-- this phase's explicit instruction — this is a separate, narrow,
+-- internal-only timestamp, never added to INQUIRY_COLUMNS/
+-- toPublicInquiry()/the detail response/the /sync/inquiries response/
+-- any report — exactly the same "internal marker, not a public field"
+-- treatment already given to follow_ups.reminder_sent_at (Phase 38D).
+--
+-- Cleared back to NULL by POST /inquiries/{id}/submit on a later
+-- successful finalization, so a since-completed inquiry never keeps
+-- showing a stale flag.
+-- =====================================================================
+
+ALTER TABLE inquiries ADD COLUMN verification_failed_at TEXT DEFAULT NULL;

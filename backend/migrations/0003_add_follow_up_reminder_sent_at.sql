@@ -1,0 +1,21 @@
+-- =====================================================================
+-- Phase 38D — adds the idempotency marker the follow-up reminder cron
+-- (src/worker/scheduled/follow-up-reminders.ts) needs to know a
+-- FOLLOW_UP_REMINDER notification has already been created for a given
+-- follow-up, so a later scheduled run (or an overlapping concurrent run)
+-- never creates a duplicate.
+--
+-- Nullable, no DEFAULT beyond SQLite's implicit NULL for a newly added
+-- column: every existing follow_ups row gets reminder_sent_at = NULL,
+-- meaning "not yet reminded" — correct for every row that predates this
+-- migration, since none of them could have been reminded before this
+-- feature existed. No backfill needed or performed.
+--
+-- Set only after createNotification() has actually succeeded for that
+-- follow-up (see the scheduled module's own doc comment for the full
+-- claim/rollback sequence that keeps this safe under overlapping cron
+-- invocations) — never set speculatively before the notification write
+-- is confirmed.
+-- =====================================================================
+
+ALTER TABLE follow_ups ADD COLUMN reminder_sent_at TEXT DEFAULT NULL;

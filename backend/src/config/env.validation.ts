@@ -92,5 +92,18 @@ export function validateEnv(config: Record<string, unknown>) {
     throw new Error(`Environment validation failed: ${message}`);
   }
 
+  // Phase 1 production-readiness fix — the isolation between the two JWT
+  // boundaries (see token.service.ts's doc comment: "a token from one
+  // boundary is cryptographically incapable of passing the other's
+  // guard") depends entirely on these two secrets actually being
+  // different. class-validator's per-field decorators above can't express
+  // a cross-field check, so it's a plain manual comparison here instead —
+  // deliberately not logging either value, only naming the two variables.
+  if (validatedConfig.JWT_ACCESS_SECRET === validatedConfig.MASTER_JWT_ACCESS_SECRET) {
+    throw new Error(
+      'Environment validation failed: JWT_ACCESS_SECRET and MASTER_JWT_ACCESS_SECRET must not be the same value.',
+    );
+  }
+
   return validatedConfig;
 }

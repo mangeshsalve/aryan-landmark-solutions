@@ -184,6 +184,40 @@ describe('InquiriesService location sync (this phase — Property→Inquiry, Opt
       expect(call.data.locality).toBeUndefined();
     });
 
+    it('SELLER -> SELLER (type explicitly re-sent, not just omitted) with unchanged propertyId does NOT re-sync — this fix only affects an actual transition INTO SELLER', async () => {
+      prisma.inquiry.findUnique.mockResolvedValue(existingSellerWithProperty); // already type: 'SELLER'
+
+      await service.update('inq-1', { type: 'SELLER', remarks: 'still a seller' } as never, actor);
+
+      expect(prisma.property.findUnique).not.toHaveBeenCalled();
+      const call = tx.inquiry.update.mock.calls[0][0];
+      expect(call.data.city).toBeUndefined();
+      expect(call.data.state).toBeUndefined();
+      expect(call.data.pincode).toBeUndefined();
+      expect(call.data.locality).toBeUndefined();
+    });
+
+    it('SELLER property relinking (existing SELLER, type also explicitly re-sent) still re-syncs from the newly-linked property — unchanged by this fix', async () => {
+      prisma.inquiry.findUnique.mockResolvedValue(existingSellerWithProperty); // already type: 'SELLER'
+      const newProperty = {
+        id: 'prop-2',
+        city: 'Nagpur',
+        state: 'MH',
+        pincode: '440001',
+        locality: 'Sitabuldi',
+      };
+      prisma.property.findUnique.mockResolvedValue(newProperty);
+
+      await service.update('inq-1', { type: 'SELLER', propertyId: 'prop-2' } as never, actor);
+
+      expect(prisma.property.findUnique).toHaveBeenCalledWith({ where: { id: 'prop-2' } });
+      const call = tx.inquiry.update.mock.calls[0][0];
+      expect(call.data.city).toBe('Nagpur');
+      expect(call.data.state).toBe('MH');
+      expect(call.data.pincode).toBe('440001');
+      expect(call.data.locality).toBe('Sitabuldi');
+    });
+
     it('BUYER: client-supplied location fields are honored directly, partial-update semantics preserved', async () => {
       prisma.inquiry.findUnique.mockResolvedValue({
         id: 'inq-2',
@@ -208,7 +242,20 @@ describe('InquiriesService location sync (this phase — Property→Inquiry, Opt
       expect(call.data.locality).toBeUndefined();
     });
 
-    it('type switching to SELLER with an already-linked propertyId (not changing in this request) does NOT re-sync — only a genuinely new property link triggers a sync', async () => {
+    it('SELLER -> BUYER (explicitly out of scope for this fix) still preserves existing location untouched, propertyId or not', async () => {
+      prisma.inquiry.findUnique.mockResolvedValue(existingSellerWithProperty); // type: 'SELLER', propertyId: 'prop-1'
+
+      await service.update('inq-1', { type: 'BUYER' } as never, actor);
+
+      expect(prisma.property.findUnique).not.toHaveBeenCalled();
+      const call = tx.inquiry.update.mock.calls[0][0];
+      expect(call.data.city).toBeUndefined();
+      expect(call.data.state).toBeUndefined();
+      expect(call.data.pincode).toBeUndefined();
+      expect(call.data.locality).toBeUndefined();
+    });
+
+    it('bug fix (this phase): type switching to SELLER with an already-linked propertyId (not changing in this request) DOES re-sync from that property, replacing the old BUYER location', async () => {
       prisma.inquiry.findUnique.mockResolvedValue({
         id: 'inq-3',
         inquiryNumber: 'INQ-3',
@@ -221,12 +268,20 @@ describe('InquiriesService location sync (this phase — Property→Inquiry, Opt
         pincode: '411001',
         locality: null,
       });
+      // propertyRow (the default prisma.property.findUnique mock) is
+      // city: 'Pune', state: 'Maharashtra', pincode: '411001',
+      // locality: 'Bhosari' — deliberately different from the
+      // pre-existing BUYER-era 'PreExisting' city, so a passing
+      // assertion here can only mean the sync actually ran.
 
       await service.update('inq-3', { type: 'SELLER' } as never, actor);
 
-      expect(prisma.property.findUnique).not.toHaveBeenCalled();
+      expect(prisma.property.findUnique).toHaveBeenCalledWith({ where: { id: 'prop-1' } });
       const call = tx.inquiry.update.mock.calls[0][0];
-      expect(call.data.city).toBeUndefined(); // left as-is, not re-synced
+      expect(call.data.city).toBe('Pune');
+      expect(call.data.state).toBe('Maharashtra');
+      expect(call.data.pincode).toBe('411001');
+      expect(call.data.locality).toBe('Bhosari');
     });
   });
 });

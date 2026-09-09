@@ -1,0 +1,40 @@
+-- =====================================================================
+-- Phase 39 (#11) — adds a display-only, backend-generated business code
+-- for customers, mirroring the existing propertyCode/inquiryNumber
+-- pattern exactly (see property-code.ts/inquiry-number.ts): random,
+-- non-sequential, purely a human-friendly label distinct from the real
+-- UUID primary key (`users.id`), which remains the actual identifier
+-- used by every API/relationship. This migration does NOT touch, rename,
+-- or regenerate propertyCode or inquiryNumber, and does NOT change any
+-- UUID primary key.
+--
+-- Nullable, not NOT NULL: existing customers get `customer_code = NULL`
+-- (SQLite's implicit default for a newly added nullable column) — no
+-- data is invented, no existing row is touched, and no backfill is
+-- performed in this phase. Only newly created customers receive a
+-- generated code going forward (see customers.ts's create handler).
+--
+-- SQLite-safe fix (production-safety follow-up): the original single-
+-- statement `ALTER TABLE users ADD COLUMN customer_code TEXT UNIQUE`
+-- fails on SQLite/D1 — confirmed directly against local D1 with the
+-- error "Cannot add a UNIQUE column: SQLITE_ERROR". SQLite's ALTER TABLE
+-- ADD COLUMN explicitly disallows a column-level UNIQUE (or PRIMARY KEY)
+-- constraint; this was never applied to production. Split into the two
+-- statements SQLite actually supports: ADD the plain nullable column,
+-- then CREATE UNIQUE INDEX separately — behaviorally identical to a
+-- column-level UNIQUE constraint for every purpose this project uses it
+-- for (customers.ts's `assertNoDuplicate`-style pre-check plus the real
+-- constraint as the authoritative backstop against a check-then-insert
+-- race, same pattern as every other unique field in this schema), and
+-- SQLite/D1 unique indexes have the exact same "multiple NULLs are
+-- distinct from one another" semantics a column-level UNIQUE constraint
+-- would have had — any number of existing NULL rows still coexist
+-- without violating this constraint. No application code change is
+-- required by this fix (verified by direct read of customers.ts): it
+-- already does a plain `SELECT ... WHERE customer_code = ?` pre-check
+-- and relies on the real constraint only as an existence-agnostic
+-- backstop, exactly as it would with either constraint form.
+-- =====================================================================
+
+ALTER TABLE users ADD COLUMN customer_code TEXT;
+CREATE UNIQUE INDEX uq_users_customer_code ON users (customer_code);

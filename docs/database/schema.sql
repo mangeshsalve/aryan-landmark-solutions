@@ -6,6 +6,13 @@
 -- Phase 16A) — a pre-existing documentation gap from before this phase,
 -- not introduced here. notifications (this phase) is included below.
 --
+-- Phase 38D added one nullable column to the real (D1) follow_ups
+-- table, `reminder_sent_at TEXT DEFAULT NULL` — see
+-- backend/migrations/0003_add_follow_up_reminder_sent_at.sql and
+-- docs/database/database-design.md's "Notifications" section. Not
+-- reflected in a CREATE TABLE block here, consistent with follow_ups'
+-- pre-existing absence from this file noted above.
+--
 -- IMPORTANT (Phase 9C-fix):
 -- This file documents the CURRENT database schema for readability. It is
 -- NOT the Prisma migration history and must never be run directly against
@@ -150,6 +157,18 @@ CREATE TABLE properties (
   -- (see PropertiesService.update).
   is_public BOOLEAN NOT NULL DEFAULT FALSE,
 
+  -- Phase 26. The actual CUSTOMER who owns the property — an explicit,
+  -- independently-set relationship, deliberately distinct from
+  -- created_by below (whichever staff member entered the listing, never
+  -- assumed to be the owner) and never inferred from a SELLER inquiry
+  -- (not guaranteed to exist or be unique). NULL means unassigned; no
+  -- CHECK constraint ties this to user_type='CUSTOMER' (Postgres CHECK
+  -- constraints can't do cross-table lookups either) — enforced in the
+  -- application layer instead, the same as every other cross-table
+  -- "must be this kind of user" rule in this schema (e.g. inquiries.
+  -- customer_id's own CUSTOMER-only rule).
+  owner_customer_id UUID REFERENCES users(id),
+
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   created_by UUID REFERENCES users(id),
@@ -165,6 +184,7 @@ CREATE INDEX idx_properties_status ON properties(status);
 CREATE INDEX idx_properties_city ON properties(city);
 CREATE INDEX idx_properties_category ON properties(category);
 CREATE INDEX idx_properties_public ON properties(is_public);
+CREATE INDEX idx_properties_owner ON properties(owner_customer_id);
 
 CREATE TABLE inquiries (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

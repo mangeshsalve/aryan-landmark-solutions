@@ -19,6 +19,35 @@ async function bootstrap() {
 
   app.setGlobalPrefix('api/v1');
 
+  // Phase 1 production-readiness fix — trust the reverse proxy/CDN (e.g.
+  // Cloudflare) that will front this API in staging/production, so
+  // req.ip (read by ThrottlerGuard's per-client rate limiting and by
+  // AuditService's ipAddress field) reflects the real client rather than
+  // the proxy's own address. Uses Express's numeric trust-proxy mode (a
+  // bounded hop count) rather than `true`, which would trust an
+  // unlimited/unspecified forwarding chain and let a client spoof its own
+  // IP by setting X-Forwarded-For itself when no proxy is actually
+  // present. TRUST_PROXY_HOPS lets the exact topology (Cloudflare alone
+  // vs. Cloudflare plus a platform load balancer) be set per deployment
+  // without a code change, defaulting to 1 (a single proxy directly in
+  // front of the app, e.g. Cloudflare) when unset. Confined to
+  // staging/production: local development and automated tests talk to
+  // this server directly, with no proxy in front, so trust-proxy is left
+  // at Express's own default (disabled) there — req.ip already reflects
+  // the real caller in that case, and enabling it would only add an
+  // unnecessary difference from how the app actually runs locally. Uses
+  // getHttpAdapter().getInstance() rather than typing `app` as
+  // NestExpressApplication, since this is the only Express-specific call
+  // in this file — this project uses the default @nestjs/platform-express
+  // adapter (no Fastify adapter is configured anywhere), so the
+  // underlying HTTP instance here is always a real Express app.
+  if (config.nodeEnv === 'staging' || config.nodeEnv === 'production') {
+    const trustProxyHops = process.env.TRUST_PROXY_HOPS
+      ? parseInt(process.env.TRUST_PROXY_HOPS, 10)
+      : 1;
+    app.getHttpAdapter().getInstance().set('trust proxy', trustProxyHops);
+  }
+
   // Without this, PrismaService.onModuleDestroy() (which calls
   // $disconnect()) never runs on SIGTERM/SIGINT — Nest doesn't listen for
   // OS shutdown signals unless explicitly told to. Matters for container

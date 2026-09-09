@@ -1,0 +1,22 @@
+name = "aryan-landmark-backend"
+
+main = "worker/index.ts"
+
+compatibility_date = "2026-08-31"
+
+compatibility_flags = ["nodejs_compat"]
+
+[[containers]]
+class_name = "AryanLandmarkBackend"
+image = "./Dockerfile"
+max_instances = 3
+
+[[durable_objects.bindings]]
+name = "BACKEND"
+class_name = "AryanLandmarkBackend"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["AryanLandmarkBackend"]
+
+enable_containers = false

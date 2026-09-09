@@ -29,6 +29,8 @@ tags:
   - name: Follow-ups
   - name: Notifications
   - name: Public Properties
+  - name: Reports
+  - name: Sync
 
 paths:
 
@@ -48,6 +50,9 @@ paths:
         `username` is users.user_id.
 
         CUSTOMER and MASTER cannot use this endpoint.
+
+        Phase 36: rate-limited per source IP via the LOGIN_RATE_LIMITER
+        Cloudflare binding, independent of MASTER login's own limiter.
       requestBody:
         required: true
         content:
@@ -65,6 +70,8 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
 
   /master-auth/login:
     post:
@@ -73,6 +80,10 @@ paths:
       description: |
         MASTER is manually provisioned in the users table.
         There is no public master-registration endpoint.
+
+        Phase 36: rate-limited per source IP via the
+        MASTER_LOGIN_RATE_LIMITER Cloudflare binding, independent of
+        application login's own limiter and configured more strictly.
       requestBody:
         required: true
         content:
@@ -88,6 +99,8 @@ paths:
                 $ref: '#/components/schemas/MasterLoginResponse'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
 
   /master/users:
     get:
@@ -243,6 +256,61 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/UserListResponse'
+
+  /users/{id}:
+    patch:
+      tags: [Users]
+      summary: Change an employee's status (activate/deactivate/block)
+      description: |
+        Phase 35. ADMIN-only — an EMPLOYEE token gets 403 here, unlike
+        GET /users above which both roles may call. Scoped to
+        userType=APPLICATION_USER: a CUSTOMER or MASTER id, or an
+        unknown id, both resolve to 404 USER_NOT_FOUND (never leaking
+        which of those it was). The request body accepts `status` only
+        — any other field (`role`, `email`, `password`, etc.) is
+        rejected with 400, not silently ignored. This is a deliberately
+        narrower sibling of PATCH /master/users/{id} (MASTER-only, can
+        change far more fields) — ADMIN gets exactly the one capability
+        this phase approved and nothing else.
+
+        Takes effect immediately, not just on the target's next login:
+        requireApplicationAuth re-checks `users.status` on every
+        authenticated request, so a status other than ACTIVE ends that
+        user's current session as soon as their device next reaches the
+        backend (see LoginResponse's `expiresIn` description). A fully
+        offline device cannot know about this until connectivity
+        returns — this is expected, not a bug, and no maximum offline
+        duration is enforced.
+      security:
+        - applicationBearer: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateUserStatusRequest'
+      responses:
+        '200':
+          description: User status updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
 
   /customers:
     get:
@@ -412,6 +480,14 @@ paths:
     get:
       tags: [Properties]
       summary: Get property
+      description: |
+        Phase 27. `data.attachments` is genuinely populated (one extra
+        query for this single property — not a per-row cost, and
+        GET /properties (list) deliberately still omits it, matching
+        PropertyListResponse). Each attachment's `fileUrl` is not a
+        usable link — the R2 bucket is private; use
+        GET /attachments/{attachmentId}/download-url to obtain a
+        short-lived viewing URL instead.
       security:
         - applicationBearer: []
       parameters:
@@ -567,6 +643,46 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/AttachmentListResponse'
+
+  /attachments/{attachmentId}/download-url:
+    get:
+      tags: [Attachments]
+      summary: Get a short-lived, secure view/download URL for an attachment
+      description: |
+        Phase 27. The R2 bucket is private (no public r2.dev access, no
+        public base URL) — this is the only supported way for an
+        authenticated client to obtain a working URL for a photo,
+        document, or recording. Verifies the attachment exists, resolves
+        its object key from the stored `r2ObjectKey` (never from client
+        input — there is no way to request an arbitrary object key
+        through this endpoint), and returns a presigned GET URL valid for
+        `expiresIn` seconds (300s — short, viewing-session-scoped, not
+        meant to be cached or reused beyond one load/open action).
+        Same authorization as every other attachment/property read
+        (ADMIN or EMPLOYEE, no additional per-resource ownership check).
+      security:
+        - applicationBearer: []
+      parameters:
+        - $ref: '#/components/parameters/AttachmentId'
+      responses:
+        '200':
+          description: A short-lived presigned URL for viewing/downloading this attachment
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttachmentDownloadUrlResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          description: Cloudflare R2 is not configured
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 
   /attachments/{attachmentId}:
     delete:
@@ -870,66 +986,81 @@ paths:
       summary: Find matching inquiries (bidirectional)
       description: |
         Phase 11 buyer/property matching foundation; bidirectional as of
-        Phase 19A; unified Inquiry.city/state/pincode/locality (replacing
-        the old BUYER-only preferredCity/preferredPincode) as of this
-        phase, with normalized city matching and fuzzy locality matching
-        (city is NOT fuzzy — see the criteria breakdown below). Which
-        direction runs depends on the path inquiry's own type:
+        Phase 19A; redesigned as a percentage-based, multi-dimension
+        engine as of Phase 40B (replacing the old fixed-point 0-100
+        `matchingScore` with per-dimension percentages plus an overall
+        percentage). Which direction runs depends on the path inquiry's
+        own type:
 
         - type=SELLER → returns matching BUYER inquiries.
         - type=BUYER → returns matching SELLER inquiries.
         - any other type (including a lightweight inquiry with type=null)
           → 400.
 
-        Both directions now score identically and symmetrically — both
-        sides read city/state/pincode/locality directly from their own
-        Inquiry row (a SELLER inquiry's location is kept in sync with its
-        linked Property; see the Inquiry schema description). Only
-        price/budget stays asymmetric: a SELLER's price always comes from
-        its linked Property, a BUYER's from its own maxBudget.
+        **Location source is asymmetric by design, and this is a hard
+        invariant, not an implementation detail**: a BUYER's location
+        always comes from the BUYER inquiry's own city/state/pincode/
+        locality; a SELLER's location always comes from its *linked
+        Property's* city/state/pincode/locality — read live via a JOIN,
+        never from the SELLER inquiry's own copied/synced fields (which
+        exist for other purposes but can drift from the live property).
+        **Customer/User profile address is never used for matching, in
+        either direction** — only the customer's name/mobile are read,
+        for display identity only.
 
-          pincode  (30%): MANDATORY exact match after normalization
-                          (trimmed). No match ⇒ zero results — this is a
-                          hard gate, not merely a scored criterion.
-          location (50%): MAX(cityScore, localityScore) — not summed.
-                          - city: normalized (trimmed, lowercased,
-                            punctuation-stripped) exact compare, not raw
-                            string equality.
-                          - locality: token-overlap fuzzy match on the
-                            same normalization, with short/numeric/generic
-                            words (road, colony, highway, ...) filtered
-                            out so they alone can't drive a false-positive
-                            match.
-          budget   (20%): the SELLER side's property price <= the BUYER
-                          side's maxBudget. Unchanged this phase.
+        Seven independently-scored dimensions, each 0-100 or `null`
+        ("not comparable for this candidate — excluded from the overall
+        average, never counted as a failing 0"), with these weights:
 
-        Only candidates scoring 70 or higher are returned, sorted by
-        matchingScore descending. The source inquiry never appears in its
-        own results.
+          pincode      20%  — exact match after normalization.
+          city         15%  — exact match after normalization.
+          state         5%  — exact match after normalization.
+          locality     10%  — token-overlap fuzzy match, short/numeric/
+                               generic words filtered out.
+          propertyType 15%  — exact match after trim+lowercase; the
+                               BUYER's `desiredPropertyType` vs the
+                               SELLER property's own `propertyType`
+                               (still free text on both sides — no
+                               fuzzy/synonym matching).
+          area         15%  — BUYER's `desiredMinArea`/`desiredAreaUnit`
+                               is a MINIMUM requirement, not an exact
+                               target; both sides are converted to a
+                               canonical square-feet unit before
+                               comparison. A smaller available area
+                               scores 0; an equal or larger one scores
+                               `100 / (1 + log10(available/required))` —
+                               100 at exact equality, smoothly
+                               diminishing (never reaching 0) as the
+                               surplus grows.
+          budget       20%  — BUYER's minBudget/maxBudget range vs the
+                               SELLER property's actual price. Within
+                               range scores 100; above the maximum or
+                               below the minimum scores a gradually
+                               decreasing percentage (steeper above the
+                               maximum than below the minimum). Only a
+                               single price exists on the SELLER side —
+                               no seller price range.
 
-        Achievable score values (documentation only — a mathematical
-        consequence of the weights above, not a separate rule, and the
-        70 threshold itself is unchanged): pincode is all-or-nothing to
-        even reach scoring (30 once gated), location is 0 or 50, budget
-        is 0 or 20 — so a gated candidate can only ever total 30, 50, 80,
-        or 100. Since 80 is the smallest of those that clears 70, the
-        *effective* minimum passing score today is 80 (pincode plus
-        budget alone, at 50, is never enough — the location criterion
-        must also match).
+        `overallMatchPercentage` is the weighted average of only the
+        non-null dimensions (their weights are excluded from the
+        denominator, not treated as zero). A candidate is returned only
+        if BOTH: (a) at least one of pincode/city/state/locality scores
+        a genuine 100 (not merely non-null) — a candidate with zero real
+        location alignment is never "a meaningful match" regardless of
+        other dimensions — and (b) `overallMatchPercentage` is at least
+        50 (an explicit, tunable threshold). Results are sorted by
+        `overallMatchPercentage` descending. The source inquiry never
+        appears in its own results.
 
         Status is NOT checked — a NEW, IN_PROGRESS, or COMPLETED inquiry
-        may all use matching; COMPLETED was never actually required by
-        this endpoint.
+        may all use matching.
 
         Insufficient data: a SELLER inquiry with no propertyId is a 400
-        (there is no price to match against). Any source with no pincode
-        yet returns an empty array, not an error — the field may simply
-        not be filled in. No fabricated matches are ever returned.
-
-        Limitation: property area/category/propertyType are NOT used as
-        matching criteria — there is no corresponding "desired
-        area/category/propertyType" field on a BUYER inquiry to compare
-        against, and none was added in this phase.
+        (there is nothing to match against). A missing pincode/city/
+        state/locality/propertyType/area/budget on either side simply
+        excludes that one dimension from scoring — it no longer causes
+        an empty result or an error the way a missing pincode used to
+        (pincode is a scored dimension now, not a mandatory gate).
       security:
         - applicationBearer: []
       parameters:
@@ -1163,6 +1294,63 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
+  /notifications/device-token:
+    post:
+      tags: [Notifications]
+      summary: Register (or transfer) an FCM device token for push notifications
+      description: |
+        Phase 41C. `userId` is always taken from the authenticated JWT —
+        never accepted in the request body. Upserts on `token`, which is
+        globally unique across all users: registering a token already
+        owned by a different application user transfers it to the
+        caller (the same physical device may later be logged into by a
+        different employee), refreshes `platform`/`lastUsedAt`, and sets
+        it active again. The token itself is never echoed back in the
+        response.
+      security:
+        - applicationBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterDeviceTokenRequest'
+      responses:
+        '200':
+          description: Token registered (or transferred) successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegisterDeviceTokenResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+    delete:
+      tags: [Notifications]
+      summary: Deactivate one of the caller's own FCM device tokens
+      description: |
+        Phase 41C. Soft-deactivates (is_active=0) the given token, scoped
+        to the caller's own tokens by user id — a token already
+        transferred away to a different user (or never owned by the
+        caller) is silently a no-op, never affecting another user's
+        registration.
+      security:
+        - applicationBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeregisterDeviceTokenRequest'
+      responses:
+        '200':
+          description: Token deactivated (or was not the caller's — same response either way)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeregisterDeviceTokenResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
   /public/properties:
     get:
       tags: [Public Properties]
@@ -1171,6 +1359,16 @@ paths:
         Returns properties where isPublic=true AND status=AVAILABLE.
         isPublic alone is not sufficient — a property marked isPublic but
         no longer AVAILABLE (e.g. SOLD) is not returned. Unauthenticated.
+
+        Phase 42B: photo `fileUrl` values are short-lived signed R2 GET
+        URLs (same expiry as the staff-only download-url endpoint),
+        minted fresh on every request — never rely on caching one beyond
+        this response. The response shape is a dedicated public schema
+        (`PublicProperty`, not the internal `Property` schema) — it never
+        includes `ownerCustomerId`/`owner` or any other internal field.
+        CORS is enabled for this route (GET only, any origin, no
+        credentials); the response also carries a short
+        `Cache-Control: public, max-age=60`.
       parameters:
         - $ref: '#/components/parameters/Page'
         - $ref: '#/components/parameters/PageSize'
@@ -1189,6 +1387,852 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/PublicPropertyListResponse'
+
+  /public/properties/{id}:
+    get:
+      tags: [Public Properties]
+      summary: Get one publicly approved property
+      description: |
+        Phase 42B. Same visibility gate as GET /public/properties
+        (isPublic=true AND status=AVAILABLE), applied directly in the
+        lookup — a property that exists but isn't public/available
+        returns the same 404 as a genuinely nonexistent id, never
+        revealing which case it was. Unauthenticated. Same photo
+        signed-URL behavior, CORS, and Cache-Control as the list
+        endpoint above.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Public property
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublicPropertyResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /public/properties/{propertyId}/inquiries:
+    post:
+      tags: [Public Properties]
+      summary: Submit a property-specific inquiry ("I'm Interested")
+      description: |
+        Phase 45B. Unauthenticated. `type` is always BUYER — the request
+        body has no `type` field, and one is rejected with a
+        VALIDATION_ERROR if sent. Re-validates the same visibility gate
+        as GET /public/properties/{id} (isPublic=true AND
+        status=AVAILABLE) — a property that exists but isn't public/
+        available returns the same 404 as a genuinely nonexistent id.
+
+        The customer is found by mobile or (case-insensitive) email
+        among existing CUSTOMER users, or created if no match exists —
+        never rejected as a duplicate (unlike POST /customers). A repeat
+        submission from the same resolved customer for the same property
+        within 5 minutes is treated as an idempotent no-op (same success
+        response, no second inquiry row).
+
+        Rate-limited independently (PUBLIC_INQUIRY_RATE_LIMITER, 5
+        requests/minute per IP) and CORS-enabled the same way as the
+        public property routes.
+      parameters:
+        - name: propertyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PublicPropertyInquiryRequest'
+      responses:
+        '201':
+          description: Inquiry submitted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublicInquiryResponse'
+        '200':
+          description: Duplicate submission within the deduplication window — treated as success, no new inquiry created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublicInquiryResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          description: Property does not exist, or is not currently public and available
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Too many submissions from this address
+
+  /public/inquiries:
+    post:
+      tags: [Public Properties]
+      summary: Submit a general contact inquiry
+      description: |
+        Phase 45B. Unauthenticated. No property is associated
+        (property_id is always NULL). The visitor explicitly selects
+        `type` (BUYER or SELLER) — required, validated server-side.
+        Same customer find-or-create behavior, same 5-minute duplicate
+        window (keyed on customer + type for this endpoint, since there
+        is no property to key on), same rate limiting and CORS as the
+        property-specific endpoint above.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PublicGeneralInquiryRequest'
+      responses:
+        '201':
+          description: Inquiry submitted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublicInquiryResponse'
+        '200':
+          description: Duplicate submission within the deduplication window — treated as success, no new inquiry created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublicInquiryResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '429':
+          description: Too many submissions from this address
+
+  /reports/dashboard:
+    get:
+      tags: [Reports]
+      summary: Dashboard summary counts
+      description: |
+        Phase 22. One call returns every dashboard card — never poll the
+        individual list endpoints just to compute counts.
+
+        **Authorization**: ADMIN or EMPLOYEE (application bearer). MASTER
+        cannot reach this endpoint (a master-scoped token fails the
+        applicationBearer check entirely — MASTER has no Reports access,
+        by design, unchanged from every other business-data module).
+
+        **Role-based scoping**: `totalInquiries`, `assignedInquiries`,
+        `unassignedInquiries`, `buyInquiries`, `sellInquiries`,
+        `totalProperties`, `availableProperties`, `totalCustomers` are
+        always global, for both ADMIN and EMPLOYEE — the same
+        unrestricted visibility those roles already have via
+        GET /properties, GET /customers, GET /inquiries.
+        `todaysFollowUps`, `pendingFollowUps`, `overdueFollowUps` are
+        global for ADMIN, but scoped to the caller's own assigned
+        inquiries for EMPLOYEE (joined through
+        `inquiries.assigned_to_user_id`, since `follow_ups` has no
+        employee column of its own).
+
+        "Today" is computed in IST (Asia/Kolkata, UTC+5:30), same fixed
+        assumption as the existing `GET /follow-ups/today`. "Overdue"
+        means `status = PENDING AND scheduledAt < now` — a computed
+        condition, never a stored field.
+      security:
+        - applicationBearer: []
+      responses:
+        '200':
+          description: Dashboard summary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DashboardSummaryResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /reports/inquiries:
+    get:
+      tags: [Reports]
+      summary: Inquiry report — totals and breakdowns
+      description: |
+        Phase 22. `byType`/`byStatus` always include every known enum
+        key at `0` when no matching rows exist — never omitted.
+
+        **Date semantics**: `fromDate`/`toDate` are calendar dates
+        (`YYYY-MM-DD`, no time component), interpreted as IST calendar
+        days and converted to a half-open UTC instant range —
+        `[00:00:00.000 IST on fromDate, 00:00:00.000 IST the day after
+        toDate)` — filtered against `inquiries.createdAt`. Both bounds
+        are optional and independent; `toDate`'s entire IST calendar day
+        is always included (never excluded by an off-by-one). This is
+        the same date semantic used by every other report endpoint in
+        this module except `/reports/follow-ups` (which filters by
+        `scheduledAt`, not `createdAt` — see that endpoint's own
+        description).
+
+        `employeeId` filters by `assigned_to_user_id` (not
+        `handledByUserId`) — the same "who owns this inquiry"
+        relationship the dashboard and follow-up report use. Unlike the
+        Employee Performance Report, this filter is not self-restricted
+        for EMPLOYEE — it describes the same inquiries any staff member
+        can already see in full via GET /inquiries.
+      security:
+        - applicationBearer: []
+      parameters:
+        - name: fromDate
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: toDate
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: employeeId
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: customerId
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: type
+          in: query
+          schema:
+            $ref: '#/components/schemas/InquiryType'
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/InquiryStatus'
+      responses:
+        '200':
+          description: Inquiry report
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InquiryReportResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /reports/follow-ups:
+    get:
+      tags: [Reports]
+      summary: Follow-up report — totals, pending/completed/overdue, today's
+      description: |
+        Phase 22. `employeeId` is enforced through the parent inquiry's
+        `assigned_to_user_id` (`follow_ups → inquiries →
+        assigned_to_user_id`) — `follow_ups` has no direct employee
+        column, and none is invented here.
+
+        **Date semantics**: unlike every other report in this module,
+        `fromDate`/`toDate` filter against `scheduled_at` (when the
+        follow-up is due), not `createdAt` — a follow-up created today
+        but due next week belongs in next week's range, not today's.
+        Same IST-calendar-day, half-open-interval conversion as
+        `/reports/inquiries` otherwise.
+
+        `todaysFollowUps` always reflects the current IST calendar day
+        and is unaffected by `fromDate`/`toDate` (a fixed concept, not a
+        queryable range) — `employeeId`/`status`, if given, still apply
+        to it. `overdue` is `status = PENDING AND scheduledAt < now`, a
+        computed condition, never a stored field. If `status` is
+        supplied, every returned count is computed within that
+        already-filtered set (e.g. `status=PENDING` makes `completed`
+        report `0`, since no COMPLETED rows remain after filtering).
+      security:
+        - applicationBearer: []
+      parameters:
+        - name: fromDate
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: toDate
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: employeeId
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/FollowUpStatus'
+      responses:
+        '200':
+          description: Follow-up report
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FollowUpReportResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /reports/employees:
+    get:
+      tags: [Reports]
+      summary: Employee performance report
+      description: |
+        Phase 22. Always returns an array, even when scoped to exactly
+        one employee — a consistent shape regardless of role/filter, so
+        the client never has to branch on response shape.
+
+        **Authorization (server-enforced, not client-trusted)**: ADMIN
+        may omit `employeeId` (returns every EMPLOYEE-role user) or pass
+        any employeeId. **EMPLOYEE is always restricted to their own
+        row** — omitting `employeeId` or passing their own id both
+        resolve to "self"; passing a different employee's id returns
+        `403 FORBIDDEN`, enforced server-side regardless of what the
+        client UI would have allowed.
+
+        `assignedInquiries`/`pendingFollowUps`/`completedFollowUps`/
+        `overdueFollowUps` are live snapshots as of now (optionally
+        narrowed by `fromDate`/`toDate` against `scheduled_at` for the
+        follow-up counts). `assignmentsInPeriod` is genuine assignment
+        *history* from `inquiry_assignments.assigned_at` — deliberately
+        not derived from the current `assigned_to_user_id` snapshot,
+        which cannot answer "how many assignments happened in this
+        historical period" for an inquiry that has since been
+        reassigned again.
+
+        No `conversionRate` or similar metric is exposed — nothing in
+        the schema distinguishes an inquiry that resulted in a sale from
+        one closed for any other reason, so `status = COMPLETED` is
+        never presented as "converted."
+      security:
+        - applicationBearer: []
+      parameters:
+        - name: fromDate
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: toDate
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: employeeId
+          in: query
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Employee performance report
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EmployeePerformanceListResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: An EMPLOYEE attempted to query another employee's performance report
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: The requested employeeId does not reference an existing application user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /reports/properties:
+    get:
+      tags: [Reports]
+      summary: Property report — totals and breakdowns
+      description: |
+        Phase 22. `byCategory` (the true enum) is the primary breakdown
+        dimension — `property_type` is free text with no enum in the
+        schema and is deliberately NOT used for aggregation here, since
+        it fragments on casing/wording variation the same way an
+        unnormalized city value would. `byCategory`/`byStatus` always
+        include every known enum key at `0`.
+
+        `byCity` groups by `LOWER(city)` to avoid fragmenting counts
+        across casing variants of the same city, but the displayed
+        `city` label is always one of the actual stored values — grouping
+        never rewrites stored data. `city` (the filter parameter) is a
+        case-insensitive exact match, the same convention already used
+        by GET /properties and GET /public/properties.
+
+        `publicCount`/`privateCount`: `isPublic` is a nullable boolean in
+        the schema (never defaulted) — `NULL` is counted as private,
+        matching how the public listing endpoint already treats anything
+        other than `isPublic = true` as not public.
+
+        Same `fromDate`/`toDate` calendar-date semantics as
+        `/reports/inquiries`, filtered against `properties.createdAt`.
+      security:
+        - applicationBearer: []
+      parameters:
+        - name: fromDate
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: toDate
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: category
+          in: query
+          schema:
+            $ref: '#/components/schemas/PropertyCategory'
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/PropertyStatus'
+        - name: city
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Property report
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PropertyReportResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /reports/customers:
+    get:
+      tags: [Reports]
+      summary: Customer report
+      description: |
+        Phase 22. `totalCustomers` is always all-time, unfiltered.
+        `customersInPeriod` and `topCustomersByInquiries` both respect
+        `fromDate`/`toDate` (same calendar-date semantics as
+        `/reports/inquiries`, filtered against `users.createdAt`) —
+        when no range is given, both describe all customers.
+
+        `topCustomersByInquiries` is a fixed top-10 (by inquiry count via
+        `users LEFT JOIN inquiries` on the real customer relationship,
+        `inquiries.customerId`) — a summary metric, not a replacement for
+        the paginated GET /customers endpoint, and not further
+        filterable/paginated in this phase. No generic "customer
+        activity score" is exposed — the schema has no engagement/last-
+        contacted field to genuinely support one; inquiry count is the
+        one real, joinable activity signal that exists.
+      security:
+        - applicationBearer: []
+      parameters:
+        - name: fromDate
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: toDate
+          in: query
+          schema:
+            type: string
+            format: date
+      responses:
+        '200':
+          description: Customer report
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CustomerReportResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /reports/inquiries/records:
+    get:
+      tags: [Reports]
+      summary: Inquiry report — paginated detail rows
+      description: |
+        Phase 31. The record-level rows behind `/reports/inquiries`'s
+        KPI counts — same filters, same date semantics (createdAt,
+        IST-calendar-day range), built from the identical shared filter
+        logic server-side so the KPI numbers and this table can never
+        describe different sets. `employeeId` is unrestricted for
+        EMPLOYEE, matching `/reports/inquiries` itself (Phase 22
+        precedent, reconfirmed for this phase).
+      security:
+        - applicationBearer: []
+      parameters:
+        - name: fromDate
+          in: query
+          schema: { type: string, format: date }
+        - name: toDate
+          in: query
+          schema: { type: string, format: date }
+        - name: employeeId
+          in: query
+          schema: { type: string, format: uuid }
+        - name: customerId
+          in: query
+          schema: { type: string, format: uuid }
+        - name: type
+          in: query
+          schema:
+            $ref: '#/components/schemas/InquiryType'
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/InquiryStatus'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: Inquiry report detail rows
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InquiryRecordListResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /reports/follow-ups/records:
+    get:
+      tags: [Reports]
+      summary: Follow-up report — paginated detail rows
+      description: |
+        Phase 31. The record-level rows behind `/reports/follow-ups`'s
+        KPI counts — same filters, same scheduled_at-based IST date
+        range (not createdAt — see `/reports/follow-ups`'s own note),
+        built from the identical shared filter logic. `overdue` is
+        computed in SQL (`status = PENDING AND scheduledAt < now`) for
+        each row individually, never a stored field. `assignedEmployeeName`
+        is resolved through the parent inquiry's `assigned_to_user_id` —
+        `follow_ups` has no direct employee column.
+      security:
+        - applicationBearer: []
+      parameters:
+        - name: fromDate
+          in: query
+          schema: { type: string, format: date }
+        - name: toDate
+          in: query
+          schema: { type: string, format: date }
+        - name: employeeId
+          in: query
+          schema: { type: string, format: uuid }
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/FollowUpStatus'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: Follow-up report detail rows
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FollowUpRecordListResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /reports/properties/records:
+    get:
+      tags: [Reports]
+      summary: Property report — paginated detail rows
+      description: |
+        Phase 31. The record-level rows behind `/reports/properties`'s
+        KPI counts — same filters plus `ownerCustomerId` (validated as a
+        UUID), same createdAt-based IST date range, built from the
+        identical shared filter logic. Reuses the same properties-LEFT-
+        JOIN-users query GET /properties (list) and
+        GET /properties/{propertyId} already use for owner resolution —
+        no new join shape, no N+1.
+      security:
+        - applicationBearer: []
+      parameters:
+        - name: fromDate
+          in: query
+          schema: { type: string, format: date }
+        - name: toDate
+          in: query
+          schema: { type: string, format: date }
+        - name: category
+          in: query
+          schema:
+            $ref: '#/components/schemas/PropertyCategory'
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/PropertyStatus'
+        - name: city
+          in: query
+          schema: { type: string }
+        - name: ownerCustomerId
+          in: query
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: Property report detail rows
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PropertyRecordListResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /reports/customers/records:
+    get:
+      tags: [Reports]
+      summary: Customer report — paginated detail rows
+      description: |
+        Phase 31. The full, paginated version of `/reports/customers`'s
+        `topCustomersByInquiries` — same filter (fromDate/toDate against
+        `users.createdAt`, i.e. customers *created* in the period, not
+        customers with activity in the period) and the identical
+        `users LEFT JOIN inquiries` query, but without that endpoint's
+        top-10 cap. `inquiryCount` is computed via `COUNT(i.id)` per
+        customer, grouped in SQL — never fetched and counted in Flutter.
+      security:
+        - applicationBearer: []
+      parameters:
+        - name: fromDate
+          in: query
+          schema: { type: string, format: date }
+        - name: toDate
+          in: query
+          schema: { type: string, format: date }
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: Customer report detail rows
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CustomerRecordListResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /sync/customers:
+    get:
+      tags: [Sync]
+      summary: Incremental/full sync feed — customers
+      description: |
+        Phase 33. Read-only sync feed for the Flutter offline cache,
+        reusing the exact `Customer` public shape and column set as
+        `GET /customers` — no second response shape per entity. Keyset
+        pagination on `(usersUpdatedAt, id)`, never OFFSET, so a page
+        stays correct even while other rows are being written
+        concurrently. `since` (omitted = full/initial sync, present =
+        incremental sync since that watermark) and `cursor` (continues
+        a listing already in progress) are independent, AND-composed
+        filters — a client resends the same `since` across every page
+        of one incremental sync. `nextCursor` is only non-null when
+        `hasMore` is true. Read visibility is identical for ADMIN and
+        EMPLOYEE, matching `GET /customers` itself — no new, sync-only
+        authorization boundary is introduced.
+      security:
+        - applicationBearer: []
+      parameters:
+        - name: since
+          in: query
+          schema: { type: string, format: date-time }
+          description: Return only customers updated after this instant. Omit for a full/initial sync.
+        - name: cursor
+          in: query
+          schema: { type: string }
+          description: Opaque continuation cursor from a previous response's `nextCursor`.
+        - name: pageSize
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+      responses:
+        '200':
+          description: A page of customer sync records
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CustomerSyncResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /sync/properties:
+    get:
+      tags: [Sync]
+      summary: Incremental/full sync feed — properties
+      description: |
+        Phase 33. Same conventions as `/sync/customers`, reusing the
+        exact `Property` shape (including `owner`/`ownerCustomerId`) via
+        the same `PROPERTY_SELECT_WITH_OWNER` join used by `GET
+        /properties`. Attachments are deliberately NOT embedded per row
+        here (unlike `GET /properties/:propertyId`) — embedding them in
+        a full listing would require one extra query per row (N+1);
+        fetch a property's attachments via its detail endpoint instead.
+      security:
+        - applicationBearer: []
+      parameters:
+        - name: since
+          in: query
+          schema: { type: string, format: date-time }
+          description: Return only properties updated after this instant. Omit for a full/initial sync.
+        - name: cursor
+          in: query
+          schema: { type: string }
+        - name: pageSize
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+      responses:
+        '200':
+          description: A page of property sync records
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PropertySyncResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /sync/inquiries:
+    get:
+      tags: [Sync]
+      summary: Incremental/full sync feed — inquiries
+      description: |
+        Phase 33. Same conventions as `/sync/customers`, reusing the
+        exact `Inquiry` shape and the identical customer/handledBy/
+        assignedTo name JOIN already used by `GET /inquiries`'s own
+        list query. Assignment history is not embedded (matches
+        `Inquiry`'s existing shape, which has never included it — see
+        `GET /inquiries/:inquiryId/assignments` for that). No implicit
+        EMPLOYEE-only filtering — identical to `GET /inquiries` today.
+      security:
+        - applicationBearer: []
+      parameters:
+        - name: since
+          in: query
+          schema: { type: string, format: date-time }
+          description: Return only inquiries updated after this instant. Omit for a full/initial sync.
+        - name: cursor
+          in: query
+          schema: { type: string }
+        - name: pageSize
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+      responses:
+        '200':
+          description: A page of inquiry sync records
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InquirySyncResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /sync/follow-ups:
+    get:
+      tags: [Sync]
+      summary: Incremental/full sync feed — follow-ups
+      description: |
+        Phase 33. Same conventions as `/sync/customers`, reusing the
+        exact `FollowUp` shape and column set as the nested
+        `GET /inquiries/:inquiryId/follow-ups` list, but as one
+        top-level, cross-inquiry feed keyed on `follow_ups.updatedAt`.
+      security:
+        - applicationBearer: []
+      parameters:
+        - name: since
+          in: query
+          schema: { type: string, format: date-time }
+          description: Return only follow-ups updated after this instant. Omit for a full/initial sync.
+        - name: cursor
+          in: query
+          schema: { type: string }
+        - name: pageSize
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+      responses:
+        '200':
+          description: A page of follow-up sync records
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FollowUpSyncResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /sync/deletions:
+    get:
+      tags: [Sync]
+      summary: Deletion/tombstone feed for offline sync
+      description: |
+        Phase 33. Reads `audit_logs` — already written on every
+        PROPERTY/CUSTOMER/INQUIRY/FOLLOW_UP/ATTACHMENT delete, but not
+        read by any endpoint before this phase — as a zero-schema-change
+        tombstone feed. Only `entityType`/`entityId`/`deletedAt`
+        (`audit_logs.created_at`) are ever exposed; `old_values`/
+        `new_values`/`ip_address`/`user_agent` are never returned.
+        Keyset pagination on `(createdAt, id)`, same conventions as the
+        other `/sync/*` endpoints.
+      security:
+        - applicationBearer: []
+      parameters:
+        - name: since
+          in: query
+          schema: { type: string, format: date-time }
+          description: Return only deletions recorded after this instant. Omit for a full/initial sync.
+        - name: entityTypes
+          in: query
+          schema: { type: string }
+          description: >-
+            Comma-separated subset of PROPERTY, CUSTOMER, INQUIRY,
+            FOLLOW_UP, ATTACHMENT. Omit to include all five.
+          example: PROPERTY,CUSTOMER,INQUIRY,FOLLOW_UP,ATTACHMENT
+        - name: cursor
+          in: query
+          schema: { type: string }
+        - name: pageSize
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+      responses:
+        '200':
+          description: A page of deletion tombstones
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeletionSyncResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
 
 components:
 
@@ -1284,6 +2328,21 @@ components:
 
     Conflict:
       description: Business conflict
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    RateLimited:
+      description: >-
+        Phase 36. Too many login attempts from this source IP. Applies
+        only to POST /auth/login and POST /master-auth/login, each
+        backed by its own independent Cloudflare Rate Limiting binding
+        (application login and MASTER login can never exhaust each
+        other's budget). The response never reveals which email/account
+        was attempted or any internal limiter state (current count,
+        reset time) — same generic-failure principle as
+        AUTH_INVALID_CREDENTIALS.
       content:
         application/json:
           schema:
@@ -1396,7 +2455,14 @@ components:
               example: Bearer
             expiresIn:
               type: integer
-              example: 3600
+              example: 2592000
+              description: >-
+                Phase 35: application session lifetime, in seconds (30
+                days — raised from the original 3600s). There is no
+                refresh token; a session instead ends via explicit
+                logout or ADMIN deactivation (enforced server-side on
+                the next authenticated request, per requireApplicationAuth's
+                live status check), whichever comes first.
             user:
               $ref: '#/components/schemas/User'
 
@@ -1408,7 +2474,7 @@ components:
           type: boolean
         data:
           type: object
-          required: [accessToken, tokenScope]
+          required: [accessToken, tokenScope, isMaster]
           properties:
             accessToken:
               type: string
@@ -1418,9 +2484,19 @@ components:
             tokenScope:
               type: string
               example: MASTER
+            isMaster:
+              type: boolean
+              example: true
+              description: >-
+                Phase 35: explicit capability flag so the client can
+                identify a MASTER session directly from the login
+                response, instead of inferring it from which login
+                endpoint was called. Always true on this response;
+                never present on POST /auth/login's response.
             expiresIn:
               type: integer
               example: 3600
+              description: MASTER token lifetime is unchanged by Phase 35.
 
     CreateApplicationUserRequest:
       type: object
@@ -1463,10 +2539,18 @@ components:
         password-reset flow exists yet). role stays restricted to
         ADMIN/EMPLOYEE — MASTER can never be assigned here either.
 
-        A role or status change takes effect for future logins only: an
-        already-issued JWT keeps its original role/status claims until it
-        expires (up to 1 hour) or the user logs in again — there is no
-        token revocation mechanism in this project.
+        A role change takes effect for future logins only: an
+        already-issued JWT keeps its original `role` claim until it
+        expires (now up to 30 days — see LoginResponse) or the user logs
+        in again — role is never re-checked against the DB per request.
+
+        A status change, as of Phase 35, takes effect immediately:
+        requireApplicationAuth re-checks the token holder's current
+        `users.status` on every authenticated request (see
+        PATCH /users/{id} below, the staff-facing ADMIN equivalent of
+        this status change), so setting status to anything other than
+        ACTIVE here invalidates that user's existing session the moment
+        they next reach the backend — not only on their next login.
       properties:
         name:
           type: string
@@ -1632,6 +2716,20 @@ components:
         name:
           type: string
 
+    UpdateUserStatusRequest:
+      type: object
+      required: [status]
+      description: |
+        Phase 35 — the request body for PATCH /users/{id}. `status` is
+        the only accepted field; the endpoint returns 400 if any other
+        key (role, email, password, etc.) is present in the body at all,
+        rather than silently ignoring it.
+      properties:
+        status:
+          type: string
+          enum: [ACTIVE, INACTIVE, BLOCKED]
+      additionalProperties: false
+
     UserResponse:
       type: object
       required: [success, data]
@@ -1708,6 +2806,22 @@ components:
             A shareable location URL (e.g. from Google Maps) selected via
             Flutter's own map picker. Validated as a well-formed URL only
             — not verified against any Maps API.
+        ownerCustomerId:
+          type: string
+          format: uuid
+          nullable: true
+          description: |
+            Phase 26. The actual CUSTOMER who owns the property — must
+            reference an existing user with userType=CUSTOMER (rejected
+            with VALIDATION_ERROR otherwise, including a reference to an
+            ADMIN/EMPLOYEE/MASTER user, or to a user id that doesn't
+            exist at all). Deliberately unrelated to createdBy (the
+            staff member who entered the listing) and never inferred
+            from a SELLER inquiry. On create, omitting this field or
+            passing null both mean "no owner assigned". On update,
+            omitting the field leaves the existing owner unchanged;
+            explicitly passing null clears it — the key's presence in
+            the request body is significant, not just its value.
 
     UpdatePropertyRequest:
       allOf:
@@ -1790,6 +2904,35 @@ components:
           $ref: '#/components/schemas/PropertyStatus'
         isPublic:
           type: boolean
+        ownerCustomerId:
+          type: string
+          format: uuid
+          nullable: true
+          description: Phase 26. Flat foreign key — null when unassigned. See PropertyOwner for the display-ready form.
+        owner:
+          allOf:
+            - $ref: '#/components/schemas/PropertyOwner'
+          nullable: true
+          description: |
+            Phase 26. Null when ownerCustomerId is null, or when it's set
+            but the referenced user could not be resolved. Present
+            (id/name/mobile only — never a full Customer/User object) in
+            both GET /properties (list) and GET /properties/{propertyId}
+            (detail); the list endpoint resolves this via one JOIN, not a
+            per-property lookup.
+
+    PropertyOwner:
+      type: object
+      required: [id, name]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        mobile:
+          type: string
+          nullable: true
 
     PropertyResponse:
       type: object
@@ -2000,6 +3143,24 @@ components:
               type: integer
               example: 900
 
+    AttachmentDownloadUrlResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+        data:
+          type: object
+          required: [downloadUrl, expiresIn]
+          properties:
+            downloadUrl:
+              type: string
+              format: uri
+              description: A presigned R2 GET URL, valid only for expiresIn seconds. Not meant to be stored or reused.
+            expiresIn:
+              type: integer
+              example: 300
+
     CreateInquiryRequest:
       type: object
       description: |
@@ -2057,6 +3218,36 @@ components:
           type: number
           minimum: 0
           description: BUYER matching preference — maximum price the buyer is willing to pay.
+        minBudget:
+          type: number
+          minimum: 0
+          description: >-
+            Phase 40B — BUYER matching preference, minimum acceptable
+            price. Optional; a candidate below this (when both minBudget
+            and maxBudget are set) scores a gradually decreasing budget
+            percentage rather than a full 100.
+        desiredPropertyType:
+          type: string
+          minLength: 1
+          maxLength: 50
+          description: >-
+            Phase 40B — BUYER matching preference for property type.
+            Free text, compared against a SELLER property's own
+            propertyType via exact match after trim+lowercase — no
+            enum on either side, no fuzzy/synonym matching.
+        desiredMinArea:
+          type: number
+          minimum: 0
+          description: >-
+            Phase 40B — BUYER matching preference: the MINIMUM area
+            required (not an exact target). Must be paired with
+            desiredAreaUnit to be used in matching.
+        desiredAreaUnit:
+          $ref: '#/components/schemas/PropertyAreaUnit'
+          description: >-
+            Phase 40B — unit for desiredMinArea. Reuses the exact same
+            enum Property.areaUnit already uses (SQ_FT/SQ_YD/SQ_M/ACRE/
+            GUNTHA/HECTARE) — no new unit is introduced.
 
     UpdateInquiryRequest:
       type: object
@@ -2104,6 +3295,22 @@ components:
           type: number
           minimum: 0
           description: BUYER matching preference — maximum price the buyer is willing to pay.
+        minBudget:
+          type: number
+          minimum: 0
+          description: Phase 40B — see CreateInquiryRequest.minBudget.
+        desiredPropertyType:
+          type: string
+          minLength: 1
+          maxLength: 50
+          description: Phase 40B — see CreateInquiryRequest.desiredPropertyType.
+        desiredMinArea:
+          type: number
+          minimum: 0
+          description: Phase 40B — see CreateInquiryRequest.desiredMinArea.
+        desiredAreaUnit:
+          $ref: '#/components/schemas/PropertyAreaUnit'
+          description: Phase 40B — see CreateInquiryRequest.desiredAreaUnit.
 
     AssignInquiryRequest:
       type: object
@@ -2209,7 +3416,8 @@ components:
           nullable: true
           description: |
             Unified location field (this phase, replacing the old BUYER-only
-            preferredPincode). Mandatory exact-match gate for matching — see
+            preferredPincode). A scored matching dimension (20% weight) as of
+            Phase 40B — no longer a mandatory gate. See
             GET /inquiries/{inquiryId}/matches.
         locality:
           type: string
@@ -2222,6 +3430,23 @@ components:
           type: number
           nullable: true
           description: BUYER matching preference — maximum price the buyer is willing to pay.
+        minBudget:
+          type: number
+          nullable: true
+          description: Phase 40B — BUYER matching preference, minimum acceptable price. See CreateInquiryRequest.minBudget.
+        desiredPropertyType:
+          type: string
+          nullable: true
+          description: Phase 40B — BUYER matching preference for property type. See CreateInquiryRequest.desiredPropertyType.
+        desiredMinArea:
+          type: number
+          nullable: true
+          description: Phase 40B — BUYER matching preference, minimum required area. See CreateInquiryRequest.desiredMinArea.
+        desiredAreaUnit:
+          allOf:
+            - $ref: '#/components/schemas/PropertyAreaUnit'
+          nullable: true
+          description: Phase 40B — unit for desiredMinArea.
         submittedAt:
           type: string
           format: date-time
@@ -2321,28 +3546,70 @@ components:
           items:
             $ref: '#/components/schemas/Assignment'
 
+    MatchBreakdown:
+      type: object
+      description: >-
+        Phase 40B — per-dimension match percentages, each 0-100 or null
+        ("not comparable for this candidate — excluded from the overall
+        weighted average, never counted as a failing 0"). See the
+        matches endpoint description for each dimension's exact formula
+        and weight.
+      properties:
+        pincode:
+          type: integer
+          nullable: true
+          minimum: 0
+          maximum: 100
+        city:
+          type: integer
+          nullable: true
+          minimum: 0
+          maximum: 100
+        state:
+          type: integer
+          nullable: true
+          minimum: 0
+          maximum: 100
+        locality:
+          type: integer
+          nullable: true
+          minimum: 0
+          maximum: 100
+        propertyType:
+          type: integer
+          nullable: true
+          minimum: 0
+          maximum: 100
+        area:
+          type: integer
+          nullable: true
+          minimum: 0
+          maximum: 100
+        budget:
+          type: integer
+          nullable: true
+          minimum: 0
+          maximum: 100
+
     InquiryMatch:
       type: object
       description: |
-        An opposite-type inquiry that scored at least 70 against the
-        source inquiry (Phase 11; bidirectional as of Phase 19A; unified
-        location fields as of this phase, with normalized city matching
-        and fuzzy locality matching — city is NOT fuzzy). For a SELLER
-        source, entries are matching BUYER inquiries; for a BUYER
-        source, entries are matching SELLER inquiries. Weights: pincode
-        30% (mandatory gate), location (MAX of city-normalized-exact and
-        locality-fuzzy-token, not summed) 50%, budget 20%. Achievable
-        totals are therefore 30/50/80/100 — the 70 threshold is
-        unchanged, but 80 is effectively the minimum passing score (see
-        the matches endpoint description for the full explanation).
+        An opposite-type inquiry that reached an overallMatchPercentage
+        of at least 50 AND has at least one genuine (100%) location
+        dimension, against the source inquiry (Phase 11; bidirectional
+        as of Phase 19A; redesigned as a percentage-based, 7-dimension
+        engine as of Phase 40B, replacing the old fixed-point
+        `matchingScore`). For a SELLER source, entries are matching
+        BUYER inquiries; for a BUYER source, entries are matching
+        SELLER inquiries. See the matches endpoint description for the
+        full per-dimension formula/weights and the inclusion rule.
 
         inquiryType/propertyId are additive (Phase 19A). city/state/
-        pincode/locality (this phase, replacing preferredCity/
-        preferredPincode) are populated for BOTH match types now —
-        unlike the old buyer-only fields, these are meaningful regardless
-        of whether the matched entry is BUYER or SELLER, since both sides
-        carry their own location directly on the Inquiry row.
-      required: [inquiryId, inquiryType, customerId, customerName, matchingScore]
+        pincode/locality are populated for BOTH match types — for a
+        SELLER match these now come from the matched inquiry's *linked
+        Property* (Phase 40B; previously the inquiry's own copied
+        fields), for a BUYER match from the inquiry itself.
+      required: [inquiryId, inquiryType, customerId, customerName, overallMatchPercentage, matchBreakdown]
       properties:
         inquiryId:
           type: string
@@ -2370,28 +3637,34 @@ components:
         city:
           type: string
           nullable: true
-          description: Populated for both inquiryType=BUYER and inquiryType=SELLER matches (this phase).
+          description: >-
+            For inquiryType=SELLER, sourced from the linked Property
+            (Phase 40B). For inquiryType=BUYER, from the inquiry itself.
         state:
           type: string
           nullable: true
-          description: Populated for both inquiryType=BUYER and inquiryType=SELLER matches (this phase).
+          description: Same sourcing rule as city.
         pincode:
           type: string
           nullable: true
-          description: Populated for both inquiryType=BUYER and inquiryType=SELLER matches (this phase).
+          description: Same sourcing rule as city.
         locality:
           type: string
           nullable: true
-          description: Populated for both inquiryType=BUYER and inquiryType=SELLER matches (this phase).
+          description: Same sourcing rule as city.
         maxBudget:
           type: number
           nullable: true
-          description: Null for inquiryType=SELLER matches (a buyer-preference field, unchanged this phase).
-        matchingScore:
+          description: Null for inquiryType=SELLER matches (a buyer-preference field).
+        overallMatchPercentage:
           type: integer
-          minimum: 70
+          minimum: 50
           maximum: 100
-          description: locationScore (0 or 50) + pincodeScore (0 or 30) + budgetScore (0 or 20)
+          description: >-
+            Phase 40B — weighted average of matchBreakdown's non-null
+            dimensions. Replaces the old fixed-point matchingScore.
+        matchBreakdown:
+          $ref: '#/components/schemas/MatchBreakdown'
 
     InquiryMatchListResponse:
       type: object
@@ -2555,13 +3828,18 @@ components:
     Notification:
       type: object
       description: |
-        In-app notification (this phase). Currently produced only when an
-        ADMIN assigns/reassigns an inquiry to an employee (type=
-        INQUIRY_ASSIGNED) — employee-initiated assignment does not
-        produce one, by design (see POST /inquiries/{inquiryId}/assign).
-        Generic on purpose (same entityType/entityId/free-text-type shape
-        as internal audit events) so a future notification type doesn't
-        need a contract change.
+        In-app notification. Produced by two events: an ADMIN assigning/
+        reassigning an inquiry to an employee (type=INQUIRY_ASSIGNED) —
+        employee-initiated assignment does not produce one, by design
+        (see POST /inquiries/{inquiryId}/assign) — and, as of Phase 38D,
+        a follow-up reminder becoming due (type=FOLLOW_UP_REMINDER,
+        entityType=FOLLOW_UP, entityId=the follow-up id), created by a
+        Cloudflare Cron-triggered scheduled job rather than an HTTP
+        route, recipient always the parent inquiry's assigned employee,
+        sent at most once per follow-up. Generic on purpose (same
+        entityType/entityId/free-text-type shape as internal audit
+        events) so a new notification type never needs a contract
+        change — confirmed again by this addition requiring none.
       required: [id, type, title, message, isRead, createdAt]
       properties:
         id:
@@ -2622,6 +3900,55 @@ components:
         isRead:
           type: boolean
 
+    RegisterDeviceTokenRequest:
+      type: object
+      description: |
+        Phase 41C. The FCM registration token as issued by the Firebase
+        SDK on the device — accepted here only to be stored, never
+        returned by any endpoint.
+      required: [token, platform]
+      properties:
+        token:
+          type: string
+          description: The FCM registration token. Never echoed back in any response.
+        platform:
+          type: string
+          enum: [ANDROID, IOS]
+
+    RegisterDeviceTokenResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+        data:
+          type: object
+          required: [registered]
+          properties:
+            registered:
+              type: boolean
+
+    DeregisterDeviceTokenRequest:
+      type: object
+      required: [token]
+      properties:
+        token:
+          type: string
+          description: The FCM registration token to deactivate.
+
+    DeregisterDeviceTokenResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+        data:
+          type: object
+          required: [deactivated]
+          properties:
+            deactivated:
+              type: boolean
+
     PublicPhoto:
       type: object
       required: [id, fileUrl, isPrimary, displayOrder]
@@ -2629,6 +3956,10 @@ components:
         A PHOTO attachment as exposed to public visitors — deliberately a
         narrower shape than Attachment: no r2Bucket/r2ObjectKey (internal
         storage details) and no uploadedBy (employee information).
+        Phase 42B: `fileUrl` is now a short-lived signed R2 GET URL,
+        minted fresh per request (previously always null — no public R2
+        base URL is configured, and this bucket stays private by
+        design), rather than a stable public link.
       properties:
         id:
           type: string
@@ -2636,20 +3967,111 @@ components:
         fileUrl:
           type: string
           nullable: true
+          description: Short-lived signed GET URL, or null if it could not be minted (e.g. R2 temporarily unreachable) — never a stable/cacheable link.
         isPrimary:
           type: boolean
         displayOrder:
           type: integer
 
     PublicProperty:
-      allOf:
-        - $ref: '#/components/schemas/Property'
-        - type: object
-          properties:
-            photos:
-              type: array
-              items:
-                $ref: '#/components/schemas/PublicPhoto'
+      type: object
+      required:
+        [
+          id,
+          propertyCode,
+          propertyType,
+          category,
+          status,
+          area,
+          areaUnit,
+          price,
+          priceUnit,
+          description,
+          address,
+          locality,
+          city,
+          state,
+          pincode,
+          latitude,
+          longitude,
+          mapUrl,
+          photos,
+        ]
+      description: |
+        Phase 42B: a standalone schema — deliberately NOT built on top of
+        the internal `Property` schema (allOf), specifically so
+        `ownerCustomerId`/`owner` (internal customer identifiers, no
+        legitimate public purpose) and `isPublic`/`gatNoDetails` can
+        never appear here by construction, not merely by omission at
+        write time. Mirrors the backend's own dedicated
+        toPublicPropertySummary() mapper (routes/public-properties.ts),
+        which is built from an explicit allow-list, not a stripped-down
+        copy of the internal mapper.
+      properties:
+        id:
+          type: string
+          format: uuid
+        propertyCode:
+          type: string
+        propertyType:
+          type: string
+        category:
+          $ref: '#/components/schemas/PropertyCategory'
+        status:
+          $ref: '#/components/schemas/PropertyStatus'
+        area:
+          type: number
+          nullable: true
+        areaUnit:
+          allOf:
+            - $ref: '#/components/schemas/PropertyAreaUnit'
+          nullable: true
+        price:
+          type: number
+          nullable: true
+        priceUnit:
+          type: string
+          nullable: true
+        description:
+          type: string
+          nullable: true
+        address:
+          type: string
+          nullable: true
+        locality:
+          type: string
+          nullable: true
+        city:
+          type: string
+          nullable: true
+        state:
+          type: string
+          nullable: true
+        pincode:
+          type: string
+          nullable: true
+        latitude:
+          type: number
+          nullable: true
+        longitude:
+          type: number
+          nullable: true
+        mapUrl:
+          type: string
+          nullable: true
+        photos:
+          type: array
+          items:
+            $ref: '#/components/schemas/PublicPhoto'
+
+    PublicPropertyResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+        data:
+          $ref: '#/components/schemas/PublicProperty'
 
     PublicPropertyListResponse:
       type: object
@@ -2663,6 +4085,61 @@ components:
             $ref: '#/components/schemas/PublicProperty'
         pagination:
           $ref: '#/components/schemas/Pagination'
+
+    PublicPropertyInquiryRequest:
+      type: object
+      required: [name, mobile, message]
+      description: |
+        Phase 45B. `type` is deliberately not a field here — the server
+        always creates a BUYER inquiry for this endpoint; sending `type`
+        is rejected with a VALIDATION_ERROR.
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 150
+        mobile:
+          type: string
+          minLength: 1
+          maxLength: 20
+        email:
+          type: string
+          format: email
+          maxLength: 255
+          nullable: true
+        message:
+          type: string
+          minLength: 1
+          maxLength: 1500
+
+    PublicGeneralInquiryRequest:
+      allOf:
+        - $ref: '#/components/schemas/PublicPropertyInquiryRequest'
+        - type: object
+          required: [type]
+          properties:
+            type:
+              type: string
+              enum: [BUYER, SELLER]
+
+    PublicInquiryResponse:
+      type: object
+      required: [success, data]
+      description: |
+        Deliberately minimal — the response envelope matches this API's
+        universal {success, data} convention, and `data` never includes
+        the inquiry id, the customer id, the assigned/handling employee,
+        or any other internal identifier.
+      properties:
+        success:
+          type: boolean
+        data:
+          type: object
+          required: [message]
+          properties:
+            message:
+              type: string
+              example: Thank you. Your inquiry has been submitted successfully.
 
     Pagination:
       type: object
@@ -2708,3 +4185,484 @@ components:
         data:
           type: object
           additionalProperties: true
+
+    # --- Phase 22: Reports -------------------------------------------
+
+    DashboardSummaryResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          type: object
+          required:
+            - totalInquiries
+            - assignedInquiries
+            - unassignedInquiries
+            - buyInquiries
+            - sellInquiries
+            - todaysFollowUps
+            - pendingFollowUps
+            - overdueFollowUps
+            - totalProperties
+            - availableProperties
+            - totalCustomers
+          properties:
+            totalInquiries: { type: integer }
+            assignedInquiries: { type: integer }
+            unassignedInquiries: { type: integer }
+            buyInquiries: { type: integer }
+            sellInquiries: { type: integer }
+            todaysFollowUps: { type: integer }
+            pendingFollowUps: { type: integer }
+            overdueFollowUps: { type: integer }
+            totalProperties: { type: integer }
+            availableProperties: { type: integer }
+            totalCustomers: { type: integer }
+
+    InquiryReportResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          type: object
+          required: [total, byType, byStatus, assigned, unassigned]
+          properties:
+            total:
+              type: integer
+              description: >-
+                May exceed byType.BUYER + byType.SELLER, since `type` is
+                nullable on inquiries — rows with no type still count
+                toward `total`.
+            byType:
+              type: object
+              properties:
+                BUYER: { type: integer }
+                SELLER: { type: integer }
+            byStatus:
+              type: object
+              properties:
+                NEW: { type: integer }
+                IN_PROGRESS: { type: integer }
+                ON_HOLD: { type: integer }
+                COMPLETED: { type: integer }
+                CANCELLED: { type: integer }
+            assigned:
+              type: integer
+            unassigned:
+              type: integer
+
+    FollowUpReportResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          type: object
+          required: [total, pending, completed, overdue, todaysFollowUps]
+          properties:
+            total: { type: integer }
+            pending: { type: integer }
+            completed: { type: integer }
+            overdue: { type: integer }
+            todaysFollowUps: { type: integer }
+
+    EmployeePerformanceReport:
+      type: object
+      required:
+        - id
+        - name
+        - assignedInquiries
+        - pendingFollowUps
+        - completedFollowUps
+        - overdueFollowUps
+        - assignmentsInPeriod
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        assignedInquiries:
+          type: integer
+          description: Live snapshot count, not date-range filtered.
+        pendingFollowUps:
+          type: integer
+        completedFollowUps:
+          type: integer
+        overdueFollowUps:
+          type: integer
+        assignmentsInPeriod:
+          type: integer
+          description: >-
+            From inquiry_assignments.assigned_at — genuine assignment
+            history, not the current assigned_to_user_id snapshot.
+
+    EmployeePerformanceListResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/EmployeePerformanceReport'
+
+    PropertyReportResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          type: object
+          required: [total, byCategory, byStatus, publicCount, privateCount, byCity]
+          properties:
+            total:
+              type: integer
+            byCategory:
+              type: object
+              properties:
+                RESIDENTIAL: { type: integer }
+                INDUSTRIAL: { type: integer }
+                COMMERCIAL: { type: integer }
+                AGRICULTURAL: { type: integer }
+            byStatus:
+              type: object
+              properties:
+                AVAILABLE: { type: integer }
+                SOLD: { type: integer }
+                ON_HOLD: { type: integer }
+                INACTIVE: { type: integer }
+            publicCount:
+              type: integer
+            privateCount:
+              type: integer
+            byCity:
+              type: array
+              items:
+                type: object
+                properties:
+                  city:
+                    type: string
+                  count:
+                    type: integer
+
+    CustomerReportResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          type: object
+          required: [totalCustomers, customersInPeriod, topCustomersByInquiries]
+          properties:
+            totalCustomers:
+              type: integer
+              description: Always all-time, unfiltered by fromDate/toDate.
+            customersInPeriod:
+              type: integer
+            topCustomersByInquiries:
+              type: array
+              maxItems: 10
+              items:
+                type: object
+                properties:
+                  customerId:
+                    type: string
+                    format: uuid
+                  name:
+                    type: string
+                  inquiryCount:
+                    type: integer
+
+    # --- Phase 31: report detail/record endpoints ---------------------
+
+    InquiryRecordRow:
+      type: object
+      properties:
+        inquiryNumber:
+          type: string
+        customerName:
+          type: string
+          nullable: true
+        propertyCode:
+          type: string
+          nullable: true
+        type:
+          allOf:
+            - $ref: '#/components/schemas/InquiryType'
+          nullable: true
+        priority:
+          type: string
+        status:
+          type: string
+        assignedEmployeeName:
+          type: string
+          nullable: true
+        city:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+
+    InquiryRecordListResponse:
+      type: object
+      required: [success, data, pagination]
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/InquiryRecordRow'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+
+    PropertyRecordRow:
+      type: object
+      properties:
+        propertyCode:
+          type: string
+        propertyType:
+          type: string
+        category:
+          $ref: '#/components/schemas/PropertyCategory'
+        city:
+          type: string
+          nullable: true
+        price:
+          type: number
+          nullable: true
+        status:
+          $ref: '#/components/schemas/PropertyStatus'
+        ownerName:
+          type: string
+          nullable: true
+          description: Null when ownerCustomerId is unassigned for this property.
+        isPublic:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+
+    PropertyRecordListResponse:
+      type: object
+      required: [success, data, pagination]
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/PropertyRecordRow'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+
+    FollowUpRecordRow:
+      type: object
+      properties:
+        scheduledAt:
+          type: string
+          format: date-time
+        inquiryNumber:
+          type: string
+        customerName:
+          type: string
+          nullable: true
+        assignedEmployeeName:
+          type: string
+          nullable: true
+        status:
+          $ref: '#/components/schemas/FollowUpStatus'
+        overdue:
+          type: boolean
+          description: Computed server-side (status = PENDING AND scheduledAt < now) — never a stored field.
+        notes:
+          type: string
+          nullable: true
+
+    FollowUpRecordListResponse:
+      type: object
+      required: [success, data, pagination]
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/FollowUpRecordRow'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+
+    CustomerRecordRow:
+      type: object
+      properties:
+        name:
+          type: string
+        mobile:
+          type: string
+          nullable: true
+        email:
+          type: string
+          nullable: true
+        city:
+          type: string
+          nullable: true
+        status:
+          type: string
+        inquiryCount:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+
+    CustomerRecordListResponse:
+      type: object
+      required: [success, data, pagination]
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/CustomerRecordRow'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+
+    SyncPageData:
+      type: object
+      required: [records, nextCursor, hasMore, serverTime]
+      description: >-
+        Common envelope shape for every /sync/* endpoint's `data` field —
+        only `records`' item type differs per endpoint.
+      properties:
+        nextCursor:
+          type: string
+          nullable: true
+          description: Opaque continuation cursor. Null whenever hasMore is false.
+        hasMore:
+          type: boolean
+        serverTime:
+          type: string
+          format: date-time
+          description: >-
+            Worker-generated instant this response was produced. Clients
+            should store this (not any individual record's timestamp) as
+            their next `since` watermark for this domain.
+
+    CustomerSyncResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          allOf:
+            - $ref: '#/components/schemas/SyncPageData'
+            - type: object
+              properties:
+                records:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/Customer'
+
+    PropertySyncResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          allOf:
+            - $ref: '#/components/schemas/SyncPageData'
+            - type: object
+              properties:
+                records:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/Property'
+
+    InquirySyncResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          allOf:
+            - $ref: '#/components/schemas/SyncPageData'
+            - type: object
+              properties:
+                records:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/Inquiry'
+
+    FollowUpSyncResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          allOf:
+            - $ref: '#/components/schemas/SyncPageData'
+            - type: object
+              properties:
+                records:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/FollowUp'
+
+    DeletionTombstone:
+      type: object
+      required: [entityType, entityId, deletedAt]
+      properties:
+        entityType:
+          type: string
+          enum: [PROPERTY, CUSTOMER, INQUIRY, FOLLOW_UP, ATTACHMENT]
+        entityId:
+          type: string
+          format: uuid
+        deletedAt:
+          type: string
+          format: date-time
+
+    DeletionSyncResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          allOf:
+            - $ref: '#/components/schemas/SyncPageData'
+            - type: object
+              properties:
+                records:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/DeletionTombstone'

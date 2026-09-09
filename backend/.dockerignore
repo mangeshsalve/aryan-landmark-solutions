@@ -1,0 +1,34 @@
+# Never ship secrets or local environment values into the build context.
+.env
+.env.local
+.env.*.local
+.env.example
+
+# Dependencies and build output — installed/produced fresh inside the image.
+node_modules
+dist
+build
+coverage
+.nyc_output
+
+# Version control and editor/IDE metadata.
+.git
+.gitignore
+.idea
+.vscode
+
+# Logs and local artifacts not needed for the build.
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+*.tsbuildinfo
+
+# Tests — not needed to build or run the production image.
+test
+prisma/dev.db
+
+# Docs and unrelated local files.
+README.md
+prisma.zip

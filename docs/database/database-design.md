@@ -72,6 +72,7 @@ Important fields:
 - map_url
 - status
 - is_public
+- owner_customer_id
 
 Category:
 - RESIDENTIAL
@@ -110,6 +111,28 @@ column and its value are both retained (not dropped) — every existing
 row was already `'INR'`, so no data changed. Not used in any business
 logic or calculation (confirmed before this phase); matching already
 assumed INR on both sides, unconditionally.
+
+`owner_customer_id` (Phase 26, nullable, `REFERENCES users(id)`): the
+actual CUSTOMER who owns the property — a genuinely new, explicit
+relationship, not a repurposing of anything that already existed.
+Deliberately distinct from `created_by` (whichever ADMIN/EMPLOYEE staff
+member entered the listing — never assumed to be the owner) and never
+inferred from a SELLER inquiry linked to the property (rejected as an
+ownership source: not guaranteed to exist, not guaranteed unique if
+multiple SELLER inquiries reference the same property). `NULL` means
+"no owner assigned" — every property that existed before this phase has
+`NULL` here, and no owner is ever assigned automatically; a staff member
+(ADMIN or EMPLOYEE, same authorization as property create/update
+generally) must explicitly pick one via the property create/edit form,
+reusing the existing customer picker. The referenced user must have
+`user_type = 'CUSTOMER'` — enforced at the application layer on write
+(`POST`/`PATCH /properties`), not by a schema-level CHECK constraint
+(cross-table lookups aren't expressible in one), the same enforcement
+style `inquiries.customer_id`'s own CUSTOMER-only rule already uses.
+`GET /properties` and `GET /properties/{propertyId}` both return the
+flat `ownerCustomerId` plus a small nested `owner: {id, name, mobile}`
+summary (`null` when unassigned) — the list endpoint gets this via one
+`LEFT JOIN` to `users`, not a per-row lookup.
 
 ## 3. attachments
 
@@ -370,21 +393,41 @@ instead of an admin trail): `user_id` (recipient), `type`, `title`,
 `message`, `entity_type`/`entity_id` (optional, e.g. `INQUIRY`/the
 inquiry id), `is_read`, `read_at`, `created_at`.
 
-Currently produced only by one event: an ADMIN assigning or reassigning
-an inquiry to an employee (`type = 'INQUIRY_ASSIGNED'`) — see
-`POST /inquiries/{inquiryId}/assign` and the reassignment path of
-`PATCH /inquiries/{inquiryId}`. Gated strictly on the calling actor's
-role being ADMIN: an EMPLOYEE assigning/reassigning an inquiry to another
-employee (an existing, unrestricted business capability) never produces
-a notification, and is never blocked by this feature either — it's a
-purely additive side effect of a successful assignment, not a
-precondition of one.
+Produced by two events:
 
-No POST endpoint exists — notifications are only ever created as a
-side effect of a real business action, never directly by a client, same
-as `audit_logs`. `GET /notifications` and `PATCH /notifications/{id}`
-are both implicitly scoped to the authenticated caller's own
-notifications only.
+- An ADMIN assigning or reassigning an inquiry to an employee
+  (`type = 'INQUIRY_ASSIGNED'`) — see `POST /inquiries/{inquiryId}/assign`
+  and the reassignment path of `PATCH /inquiries/{inquiryId}`. Gated
+  strictly on the calling actor's role being ADMIN: an EMPLOYEE
+  assigning/reassigning an inquiry to another employee (an existing,
+  unrestricted business capability) never produces a notification, and
+  is never blocked by this feature either — it's a purely additive side
+  effect of a successful assignment, not a precondition of one.
+- A follow-up reminder becoming due (`type = 'FOLLOW_UP_REMINDER'`,
+  Phase 38D) — created by a Cloudflare Cron-triggered scheduled job
+  (`src/worker/scheduled/follow-up-reminders.ts`), not an HTTP route.
+  Recipient is the parent inquiry's `assigned_to_user_id`; a due
+  follow-up whose parent inquiry has no assignee is skipped, not
+  notified to anyone else (no ADMIN/MASTER copy). Sent at most once per
+  follow-up — see `follow_ups.reminder_sent_at` below.
+
+No POST endpoint exists for creating a notification directly — every
+type is only ever created as a side effect of a real business action or
+scheduled job, never directly by a client, same as `audit_logs`.
+`GET /notifications` and `PATCH /notifications/{id}` are both implicitly
+scoped to the authenticated caller's own notifications only, and both
+remain unchanged by the addition of the second event type — they read
+generically off `type`/`entity_type`/`entity_id`, never special-casing a
+specific type string.
+
+`follow_ups.reminder_sent_at` (Phase 38D, nullable, `NULL` until a
+`FOLLOW_UP_REMINDER` notification has actually been created for that
+follow-up) is the idempotency marker preventing a duplicate reminder on
+a later or overlapping scheduled run — set only after the notification
+write succeeds, never speculatively beforehand. `follow_ups` itself
+predates this doc (see the `schema.sql` header note) — full follow_ups
+documentation remains a pre-existing gap this phase does not attempt to
+backfill wholesale.
 
 ## Deletion and consistency
 

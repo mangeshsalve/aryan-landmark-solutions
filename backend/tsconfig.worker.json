@@ -1,0 +1,22 @@
+{
+  // Separate from tsconfig.json (Step 14) — the NestJS build needs
+  // CommonJS/ES2021/decorators/Node types; the Worker needs ESNext
+  // modules, bundler resolution, and Workers runtime types. These are
+  // genuinely incompatible compiler settings for one shared config to
+  // serve both, so this file exists instead of trying to merge them.
+  // Scoped with `include` to only the worker/ tree — running this
+  // config never touches, compiles, or type-checks any NestJS source
+  // file, and running the NestJS build (tsconfig.json, via `nest build`)
+  // never touches this file either.
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "lib": ["ESNext"],
+    "types": ["@cloudflare/workers-types"]
+  },
+  "include": ["src/worker/**/*.ts"]
+}
